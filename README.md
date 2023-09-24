@@ -1,0 +1,2 @@
+- ssid at most 20 char
+- pwd at most 30 char
