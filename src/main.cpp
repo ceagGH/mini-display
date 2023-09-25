@@ -14,10 +14,10 @@ button - gpio, D4
 pages to have
 - configure weather (location + apikey)
 - see current settings
-- 
+-
 
 
-TODO: fix startup flow, get wifi deets and lat/lon before 
+TODO: fix startup flow, get wifi deets and lat/lon before
 TODO: fix espcrash onclick of website button
 TODO: change EEPROM ssid, pwd, apikey sizes; switch to preferences?
 */
@@ -124,30 +124,32 @@ void setup()
   toled.begin(Wire, false, SSD1309_ARD_UNUSED_PIN); // Begin for I2C has default values for every argument
   Wire.setClock(400000);
 
-  toled.clearDisplay();
+  toled.windowClear();
+  toled.setTextCursor(0, 0);
+  toled.print("Hello world");
 
-  for (hd_hw_extent_t indi = 0; indi < toled.xExt; indi += 5)
-  {
-    toled.lineSet(0, 0, indi, toled.yExt - 1, 1);
-    delay(10);
-  }
+  // for (hd_hw_extent_t indi = 0; indi < toled.xExt; indi += 5)
+  // {
+  //   toled.lineSet(0, 0, indi, toled.yExt - 1, 1);
+  //   delay(10);
+  // }
 
-  for (hd_hw_extent_t indi = 0; indi < toled.yExt; indi += 5)
-  {
-    toled.lineSet(0, toled.yExt - 1, toled.xExt - 1, toled.yExt - indi - 1, 1);
-    delay(10);
-  }
+  // for (hd_hw_extent_t indi = 0; indi < toled.yExt; indi += 5)
+  // {
+  //   toled.lineSet(0, toled.yExt - 1, toled.xExt - 1, toled.yExt - indi - 1, 1);
+  //   delay(10);
+  // }
 
-  for (hd_hw_extent_t indi = 0; indi < toled.xExt; indi += 5)
-  {
-    toled.lineSet(toled.xExt - 1, toled.yExt - 1, toled.xExt - indi - 1, 0, 1);
-    delay(10);
-  }
+  // for (hd_hw_extent_t indi = 0; indi < toled.xExt; indi += 5)
+  // {
+  //   toled.lineSet(toled.xExt - 1, toled.yExt - 1, toled.xExt - indi - 1, 0, 1);
+  //   delay(10);
+  // }
 
-  for (hd_hw_extent_t indi = 0; indi < toled.yExt; indi += 5)
-  {
-    toled.lineSet(toled.xExt - 1, 0, 0, indi, 1);
-  }
+  // for (hd_hw_extent_t indi = 0; indi < toled.yExt; indi += 5)
+  // {
+  //   toled.lineSet(toled.xExt - 1, 0, 0, indi, 1);
+  // }
 
   // if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   // { // Address 0x3D for 128x64
@@ -196,11 +198,15 @@ void setup()
     // display.setCursor(0, 0);
     // display.print("Connecting");
     // display.display();
+    toled.windowClear();
+    toled.setTextCursor(0, 0);
+    toled.print("Connecting");
     while ((millis() - prevMillis < 60000) && (WiFi.status() != WL_CONNECTED))
     {
       delay(500);
       // display.print(".");
       // display.display();
+      toled.print(".");
     }
   }
 
@@ -214,13 +220,12 @@ void setup()
     Serial.print("AP IP address: ");
     Serial.println(IP);
 
-    // display.clearDisplay();
-    // display.setCursor(0, 0);
-    // display.println("Please connect to this WiFi:");
-    // display.println(espmac);
-    // display.println("And complete the setup here:");
-    // display.println(IP);
-    // display.display();
+    toled.windowClear();
+    toled.setTextCursor(0, 0);
+    toled.println("Please connect to this WiFi:");
+    toled.println(espmac);
+    toled.println("And complete the setup here:");
+    toled.println(IP);
 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               { request->send(SPIFFS, "/wifi.html", String(), false, wifi_processor); });
@@ -231,11 +236,12 @@ void setup()
     Serial.print("Connected to WiFi network with IP Address: ");
     Serial.println(WiFi.localIP());
 
-    // display.clearDisplay();
-    // display.setCursor(0, 10);
-    // display.println(WiFi.localIP());
-    // display.println(WiFi.RSSI());
-    // display.display();
+    toled.windowClear();
+    toled.setTextCursor(0, 0);
+    toled.print("IP: ");
+    toled.println(WiFi.localIP());
+    toled.print("RSSI: ");
+    toled.println(WiFi.RSSI());
 
     // Route for root / web page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -269,6 +275,9 @@ void setup()
       // display.setCursor(0, 0);
       // display.println("Details received! Restarting now...");
       // display.display();
+      toled.windowClear();
+      toled.setTextCursor(0,0);
+      toled.println("Details received! Restarting now...");
 
       delay(2000);
       ESP.restart();
@@ -285,7 +294,7 @@ void setup()
       int inputState = (request->getParam("state")->value()).toInt();
       digitalWrite(inputPin, inputState);
 
-      sprintf(charbuf, "GPIO: %s - Set to: %s - Running on Core %d", inputPin, inputState, xPortGetCoreID());
+      sprintf(charbuf, "GPIO: %d - Set to: %d - Running on Core %d", inputPin, inputState, xPortGetCoreID());
       Serial.println(charbuf);
     }  
 
@@ -425,7 +434,7 @@ String wifi_processor(const String &var)
 // Replaces placeholder with button section in your web page
 String main_processor(const String &var)
 {
-  // Serial.println(var);
+  Serial.println(var);
   if (var == "BUTTONPLACEHOLDER")
   {
     String buttons = "";
