@@ -3,19 +3,17 @@ Core 1 - Runs webserver async, handles OTA, fetches weather, manage DHT sensor, 
 Core 0 - plays piezo sometimes, handles button stop alarm
 
 TODO: finalize commponents, send mrkang
-esp32  -      - RM
+esp32  -
 dht    - gpio
-toled  - i2c
+oled   - spi
 7seg   - gpio
-piezo  - pwm
-button - gpio, D4
+piezo  - pwm D4
+button - gpio
 
 
 pages to have
 - configure weather (location + apikey)
 - see current settings
--
-
 
 TODO: fix startup flow, get wifi deets and lat/lon before
 TODO: fix espcrash onclick of website button
@@ -24,31 +22,21 @@ TODO: change EEPROM ssid, pwd, apikey sizes; switch to preferences?
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <SPI.h>
+
+// ------------------------------------------ SETUP DISPLAYS ------------------------------------------
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-// #define SCREEN_WIDTH 128 // OLED display width, in pixels
-// #define SCREEN_HEIGHT 64 // OLED display height, in pixels
-// // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
-// Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
 
-#include "HyperDisplay_UG2856KLBAG01.h"
-#define RES_PIN 34
-UG2856KLBAG01_I2C toled;
-
-#include "SPIFFS.h"
-#include <EEPROM.h>
-// #include "Preferences.h"
-
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
-// #include <AsyncElegantOTA.h>
-#include <Arduino_JSON.h>
-// https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
-// https://randomnerdtutorials.com/esp32-ota-over-the-air-arduino/
-// Include the library
+#define OLED_MOSI 16
+#define OLED_CLK 22
+#define OLED_DC 26
+#define OLED_CS 21
+#define OLED_RESET 14
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
 
 #include <TM1637Display.h>
 // Define the connections pins
@@ -56,6 +44,17 @@ UG2856KLBAG01_I2C toled;
 #define TM_DIO 33
 TM1637Display segdisplay = TM1637Display(TM_CLK, TM_DIO);
 // segdisplay.showNumberDecEx(number, 0b01000000, leading_zeros, length, position)
+
+// ------------------------------------------ SETUP WIFI ------------------------------------------
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
+// #include <AsyncElegantOTA.h>     // https://randomnerdtutorials.com/esp32-ota-over-the-air-arduino/
+#include <Arduino_JSON.h>
+
+// ------------------------------------------ SETUP INPUTS/OUTPUTS ------------------------------------------
 
 #include <DHT.h>
 #define DHT_SENSOR_PIN 27 // ESP32 pin GPIO21 connected to DHT11 sensor
@@ -65,14 +64,25 @@ float dht_temp;
 float dht_hum;
 
 #define ONBOARD_LED 2
-#define BUZZER_PIN 5
+#define BUZZER_PIN 4
 
+#include "pitches.h"
+#define TONE_CHANNEL 15
+TaskHandle_t piezoTask;
+
+void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel);
+void noTone(uint8_t pin, uint8_t channel);
+void playPiezo(void *pvParameters);
+
+// ------------------------------------------ SETUP MEMORY/VARIABLES ------------------------------------------
+
+#include "SPIFFS.h"
+#include <EEPROM.h>
+// #include "Preferences.h"
+
+#define EEPROM_SIZE 512 // max is 512
 unsigned long prevMillis = 0;
 unsigned long timerDelay = 10000;
-
-// TODO: save in EEPROM, allow edit from webserver
-// const char *ssid = "ongzz";
-// const char *password = "passwordlol";
 
 AsyncWebServer server(80);
 String wifi_processor(const String &var);
@@ -81,32 +91,17 @@ String main_processor(const String &var);
 String jsonBuffer;
 String httpGETRequest(const char *serverName);
 
-float temperature;
-int pressure;
-int humidity;
-float windspeed;
-
-#define EEPROM_SIZE 512
-// max can use is 512
+float temperature, windspeed;
+int pressure, humidity;
 
 char charbuf[69];
-String ssid;
-String password;
+String ssid, password;
 String getESPMac();
 
 String serverPath;
-String openWeatherMapApiKey;
-String city = "George Town";
-String countryCode = "MY";
+String city = "George Town", countryCode = "MY", openWeatherMapApiKey = "";
 
-TaskHandle_t piezoTask;
-
-#define TONE_CHANNEL 15
-#include "pitches.h"
-void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel);
-void noTone(uint8_t pin, uint8_t channel);
-
-void playPiezo(void *pvParameters);
+// ------------------------------------------ SETUP FUNCTION ------------------------------------------
 
 void setup()
 {
@@ -120,46 +115,20 @@ void setup()
   segdisplay.setBrightness(3);
   segdisplay.showNumberDecEx(1234, 0b01000000, false, 4, 0);
 
-  Wire.begin();
-  toled.begin(Wire, false, SSD1309_ARD_UNUSED_PIN); // Begin for I2C has default values for every argument
-  Wire.setClock(400000);
+  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+  {
+    Serial.println("SSD1306 allocation failed");
+    delay(1000);
+    ESP.restart();
+    // for(;;); // Don't proceed, loop forever
+  }
+  display.setTextSize(1);
+  display.setTextColor(WHITE); // Draw white text
 
-  toled.windowClear();
-  toled.setTextCursor(0, 0);
-  toled.print("Hello world");
-
-  // for (hd_hw_extent_t indi = 0; indi < toled.xExt; indi += 5)
-  // {
-  //   toled.lineSet(0, 0, indi, toled.yExt - 1, 1);
-  //   delay(10);
-  // }
-
-  // for (hd_hw_extent_t indi = 0; indi < toled.yExt; indi += 5)
-  // {
-  //   toled.lineSet(0, toled.yExt - 1, toled.xExt - 1, toled.yExt - indi - 1, 1);
-  //   delay(10);
-  // }
-
-  // for (hd_hw_extent_t indi = 0; indi < toled.xExt; indi += 5)
-  // {
-  //   toled.lineSet(toled.xExt - 1, toled.yExt - 1, toled.xExt - indi - 1, 0, 1);
-  //   delay(10);
-  // }
-
-  // for (hd_hw_extent_t indi = 0; indi < toled.yExt; indi += 5)
-  // {
-  //   toled.lineSet(toled.xExt - 1, 0, 0, indi, 1);
-  // }
-
-  // if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
-  // { // Address 0x3D for 128x64
-  //   Serial.println(F("SSD1306 allocation failed"));
-  //   for (;;)
-  //     ;
-  // }
-  // display.setTextSize(1);
-  // display.setTextColor(WHITE);
-  delay(2000);
+  Serial.println("display has been init");
+  display.display();
+  delay(2000); // Pause for 2 seconds
 
   EEPROM.begin(EEPROM_SIZE);
   // Initialize SPIFFS
@@ -186,7 +155,7 @@ void setup()
 
   // try connecting first; if waited 60sec then open wifi connect
   // Serial.println(ssid.length());
-  if (0 < ssid.length() && ssid.length() <= 20)
+  if (0 < ssid.length() && ssid.length() <= 20 && openWeatherMapApiKey.length() == 32)
   {
     serverPath = "http://api.openweathermap.org/data/2.5/weather?q=" + city + "," + countryCode + "&APPID=" + openWeatherMapApiKey;
 
@@ -194,19 +163,16 @@ void setup()
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(ssid, password);
 
-    // display.clearDisplay();
-    // display.setCursor(0, 0);
-    // display.print("Connecting");
-    // display.display();
-    toled.windowClear();
-    toled.setTextCursor(0, 0);
-    toled.print("Connecting");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("Connecting");
+    display.display();
+
     while ((millis() - prevMillis < 60000) && (WiFi.status() != WL_CONNECTED))
     {
       delay(500);
-      // display.print(".");
-      // display.display();
-      toled.print(".");
+      display.print(".");
+      display.display();
     }
   }
 
@@ -220,12 +186,13 @@ void setup()
     Serial.print("AP IP address: ");
     Serial.println(IP);
 
-    toled.windowClear();
-    toled.setTextCursor(0, 0);
-    toled.println("Please connect to this WiFi:");
-    toled.println(espmac);
-    toled.println("And complete the setup here:");
-    toled.println(IP);
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Please connect to this WiFi:");
+    display.println(espmac);
+    display.println("And complete the setup here:");
+    display.println(IP);
+    display.display();
 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               { request->send(SPIFFS, "/wifi.html", String(), false, wifi_processor); });
@@ -236,12 +203,13 @@ void setup()
     Serial.print("Connected to WiFi network with IP Address: ");
     Serial.println(WiFi.localIP());
 
-    toled.windowClear();
-    toled.setTextCursor(0, 0);
-    toled.print("IP: ");
-    toled.println(WiFi.localIP());
-    toled.print("RSSI: ");
-    toled.println(WiFi.RSSI());
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("IP: ");
+    display.println(WiFi.localIP());
+    display.print("RSSI: ");
+    display.println(WiFi.RSSI());
+    display.display();
 
     // Route for root / web page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -271,13 +239,10 @@ void setup()
       EEPROM.commit();
       Serial.println("updated EEPROM");
 
-      // display.clearDisplay();
-      // display.setCursor(0, 0);
-      // display.println("Details received! Restarting now...");
-      // display.display();
-      toled.windowClear();
-      toled.setTextCursor(0,0);
-      toled.println("Details received! Restarting now...");
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Details received! Restarting now...");
+      display.display();
 
       delay(2000);
       ESP.restart();
@@ -305,6 +270,8 @@ void setup()
   Serial.println("HTTP server started");
 }
 
+// ------------------------------------------ LOOP FUNCTION ------------------------------------------
+
 void loop()
 {
   // display OLED:
@@ -326,7 +293,10 @@ void loop()
     }
     // Check WiFi connection status
     if (WiFi.status() != WL_CONNECTED)
-      Serial.println("WiFi Disconnected");
+    {
+      // Serial.println("WiFi Disconnected");
+      // TODO: add instructions
+    }
     else
     {
       Serial.println(serverPath);
@@ -398,7 +368,6 @@ String httpGETRequest(const char *serverName)
   return payload;
 }
 
-// Replaces placeholder with button section in your web page
 String wifi_processor(const String &var)
 {
   // Serial.println(var);
@@ -431,7 +400,6 @@ String wifi_processor(const String &var)
   return String();
 }
 
-// Replaces placeholder with button section in your web page
 String main_processor(const String &var)
 {
   Serial.println(var);
