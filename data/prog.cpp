@@ -3,38 +3,29 @@ Core 1 - Runs webserver async, handles OTA, fetches weather, manage DHT sensor, 
 Core 0 - plays piezo sometimes, handles button stop alarm
 
 TODO: finalize commponents, send mrkang
-esp32
+esp32  -
 dht    - gpio
 oled   - spi
 7seg   - gpio
 piezo  - pwm D4
 button - gpio
 
+
 pages to have
 - configure weather (location + apikey)
 - see current settings
-- choose alarm tone
-- choose alarm time, and reminders; connect to gcal?
 
-TODO: test button for stopping piezo
-TODO: design PCB + CAD files
-TODO: get time and show on 7seg
-TODO: polish user interface
-TODO: smoothen WiFI disconnection and allow use w/o wifi
 TODO: fix startup flow, get wifi deets and lat/lon before
-TODO: show splash screen
-TODO: wifi list // custom wifi name
+TODO: fix espcrash onclick of website button
+TODO: change EEPROM ssid, pwd, apikey sizes; switch to preferences?
 */
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
 
-// ------------------------------------------ SETUP DISPLAYS ------------------------------------------
-
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "cec_bitmap.h"
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 
@@ -45,53 +36,44 @@ TODO: wifi list // custom wifi name
 #define OLED_RESET 14
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
 
+
+#include "SPIFFS.h"
+#include <EEPROM.h>
+// #include "Preferences.h"
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+// #include <AsyncElegantOTA.h>
+#include <Arduino_JSON.h>
+// https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
+// https://randomnerdtutorials.com/esp32-ota-over-the-air-arduino/
+// Include the library
+
 #include <TM1637Display.h>
+// Define the connections pins
 #define TM_CLK 32
 #define TM_DIO 33
 TM1637Display segdisplay = TM1637Display(TM_CLK, TM_DIO);
 // segdisplay.showNumberDecEx(number, 0b01000000, leading_zeros, length, position)
 
-// ------------------------------------------ SETUP WIFI ------------------------------------------
-
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
-// #include <AsyncElegantOTA.h>     // https://randomnerdtutorials.com/esp32-ota-over-the-air-arduino/
-#include <Arduino_JSON.h>
-
-// ------------------------------------------ SETUP INPUTS/OUTPUTS ------------------------------------------
-
 #include <DHT.h>
-#define DHT_SENSOR_PIN 27 // ESP32 pin GPIO27 connected to DHT11 sensor
+#define DHT_SENSOR_PIN 27 // ESP32 pin GPIO21 connected to DHT11 sensor
 #define DHT_SENSOR_TYPE DHT22
 DHT dht_sensor(DHT_SENSOR_PIN, DHT_SENSOR_TYPE);
 float dht_temp;
 float dht_hum;
-float dht_hi;
 
 #define ONBOARD_LED 2
 #define BUZZER_PIN 4
-#define BUTTON_PIN 5
-#define PRESSED 0
-#define NOT_PRESSED 1
-
-#include "pitches.h"
-#define TONE_CHANNEL 15
-TaskHandle_t piezoTask;
-
-void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel);
-void noTone(uint8_t pin, uint8_t channel);
-void playPiezo(void *pvParameters);
-
-// ------------------------------------------ SETUP MEMORY/VARIABLES ------------------------------------------
-
-#include "SPIFFS.h"
-#include <Preferences.h>
-Preferences preferences;
 
 unsigned long prevMillis = 0;
 unsigned long timerDelay = 10000;
+
+// TODO: save in EEPROM, allow edit from webserver
+// const char *ssid = "ongzz";
+// const char *password = "passwordlol";
 
 AsyncWebServer server(80);
 String wifi_processor(const String &var);
@@ -100,17 +82,32 @@ String main_processor(const String &var);
 String jsonBuffer;
 String httpGETRequest(const char *serverName);
 
-float temperature, windspeed;
-int pressure, humidity;
+float temperature;
+int pressure;
+int humidity;
+float windspeed;
+
+#define EEPROM_SIZE 512
+// max can use is 512
 
 char charbuf[69];
-String ssid, password;
+String ssid;
+String password;
 String getESPMac();
 
 String serverPath;
-String city = "George Town", countryCode = "MY", openWeatherMapApiKey = "";
+String openWeatherMapApiKey;
+String city = "George Town";
+String countryCode = "MY";
 
-// ------------------------------------------ SETUP FUNCTION ------------------------------------------
+TaskHandle_t piezoTask;
+
+#define TONE_CHANNEL 15
+#include "pitches.h"
+void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel);
+void noTone(uint8_t pin, uint8_t channel);
+
+void playPiezo(void *pvParameters);
 
 void setup()
 {
@@ -118,8 +115,6 @@ void setup()
 
   pinMode(ONBOARD_LED, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT);
-
   digitalWrite(ONBOARD_LED, LOW);
   dht_sensor.begin();
 
@@ -127,23 +122,21 @@ void setup()
   segdisplay.showNumberDecEx(1234, 0b01000000, false, 4, 0);
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
-  {
-    Serial.println("[MODULE] SSD1306 allocation failed");
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    Serial.println("SSD1306 allocation failed");
     delay(1000);
     ESP.restart();
     // for(;;); // Don't proceed, loop forever
   }
-  Serial.println("[MODULE] Display intialized");
-  display.setRotation(2);
   display.setTextSize(1);
-  display.setTextColor(WHITE); // Draw white text
-  display.clearDisplay();
-  // show splash here? CEC
-  display.drawBitmap(0, 0, cec_bitmap, 128, 64, 1);
-  display.display();
-  delay(5000);
+  display.setTextColor(WHITE);        // Draw white text
 
+  Serial.println("display has been init");
+  display.display();
+  delay(2000); // Pause for 2 seconds
+
+
+  EEPROM.begin(EEPROM_SIZE);
   // Initialize SPIFFS
   if (!SPIFFS.begin(true))
   {
@@ -154,13 +147,14 @@ void setup()
 
   String espmac = getESPMac();
 
-  preferences.begin("pref-mem", false);
-  ssid = preferences.getString("ssid");
-  password = preferences.getString("pwd");
-  openWeatherMapApiKey = preferences.getString("apikey");
-
-  Serial.print("ssid: ");
-  Serial.println(ssid);
+  // get from EEPROM
+  EEPROM.get(0, ssid);
+  EEPROM.get(20, password);
+  for (int i = 0; i < 32; i++)
+  {
+    int c = EEPROM.read(50 + i);
+    openWeatherMapApiKey += char(c);
+  }
 
   // sprintf(charbuf, "ID: %s, PW: %s", ssid, password);
   // Serial.println(charbuf);
@@ -179,8 +173,8 @@ void setup()
     display.setCursor(0, 0);
     display.print("Connecting");
     display.display();
-
-    while ((millis() - prevMillis < 60000) && (WiFi.status() != WL_CONNECTED) && (digitalRead(BUTTON_PIN) == NOT_PRESSED))
+    
+    while ((millis() - prevMillis < 60000) && (WiFi.status() != WL_CONNECTED))
     {
       delay(500);
       display.print(".");
@@ -192,9 +186,10 @@ void setup()
   {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(espmac);
+    // save wifi in EEPROM
 
     IPAddress IP = WiFi.softAPIP();
-    Serial.print("[WIFI] AP IP address: ");
+    Serial.print("AP IP address: ");
     Serial.println(IP);
 
     display.clearDisplay();
@@ -210,7 +205,8 @@ void setup()
   }
   else
   {
-    Serial.print("[WIFI] Connected to WiFi network with IP Address: ");
+    Serial.println();
+    Serial.print("Connected to WiFi network with IP Address: ");
     Serial.println(WiFi.localIP());
 
     display.clearDisplay();
@@ -233,13 +229,21 @@ void setup()
       String inputPwd = request->getParam("pwd")->value();
       String inputApiKey = request->getParam("apikey")->value();
 
+      char apikey[32];
+      for (int c = 0; c < inputApiKey.length(); c++) apikey[c] = inputApiKey[c];
+      Serial.println(apikey);
+
       sprintf(charbuf, "%s - %s - %s", inputName, inputPwd, inputApiKey);
       Serial.println(charbuf);
 
-      preferences.putString("ssid", inputName);
-      preferences.putString("pwd", inputPwd);
-      preferences.putString("apikey", inputApiKey);
-      Serial.println("[CODE] Updated preferences");
+      EEPROM.put(0, inputName);
+      EEPROM.put(20, inputPwd);
+      for (int i=0; i<32; i++) {
+        EEPROM.write(50+i, int(inputApiKey[i]));
+        delay(5);
+      }
+      EEPROM.commit();
+      Serial.println("updated EEPROM");
 
       display.clearDisplay();
       display.setCursor(0, 0);
@@ -261,7 +265,7 @@ void setup()
       int inputState = (request->getParam("state")->value()).toInt();
       digitalWrite(inputPin, inputState);
 
-      sprintf(charbuf, "[GPIO] %d - Set to: %d - Running on Core %d", inputPin, inputState, xPortGetCoreID());
+      sprintf(charbuf, "GPIO: %d - Set to: %d - Running on Core %d", inputPin, inputState, xPortGetCoreID());
       Serial.println(charbuf);
     }  
 
@@ -269,10 +273,8 @@ void setup()
 
   // AsyncElegantOTA.begin(&server); // Start ElegantOTA
   server.begin();
-  Serial.println("[WIFI] HTTP server started");
+  Serial.println("HTTP server started");
 }
-
-// ------------------------------------------ LOOP FUNCTION ------------------------------------------
 
 void loop()
 {
@@ -284,14 +286,14 @@ void loop()
   {
     dht_temp = dht_sensor.readTemperature();
     dht_hum = dht_sensor.readHumidity();
-    dht_hi = dht_sensor.computeHeatIndex(dht_temp, dht_hum, false);
-
     if (isnan(dht_temp) || isnan(dht_hum))
-      Serial.println("[MODULE] Failed to read from DHT sensor!");
+      Serial.println("Failed to read from DHT sensor!");
     else
     {
-      sprintf(charbuf, "[MODULE] DHT READ: %.2fC, %.2f%, %.2fC", dht_temp, dht_hum, dht_hi);
+      sprintf(charbuf, "DHT READ: %.2fC, %.2f%", dht_temp, dht_hum);
       Serial.println(charbuf);
+      Serial.println(dht_temp);
+      Serial.println(dht_hum);
     }
     // Check WiFi connection status
     if (WiFi.status() != WL_CONNECTED)
@@ -301,18 +303,21 @@ void loop()
     }
     else
     {
+      Serial.println(serverPath);
+
       jsonBuffer = httpGETRequest(serverPath.c_str());
-      // Serial.println(serverPath);
-      // Serial.println(jsonBuffer);
-      // Serial.println();
+      Serial.println(jsonBuffer);
+      Serial.println();
       JSONVar jsObj = JSON.parse(jsonBuffer);
 
       // JSON.typeof(jsonVar) can be used to get the type of the var
       if (JSON.typeof(jsObj) == "undefined")
       {
-        Serial.println("[CODE] Parsing input failed!");
+        Serial.println("Parsing input failed!");
         return;
       }
+      // Serial.print("JSON object = ");
+      // Serial.println(jsObj);
 
       xTaskCreatePinnedToCore(
           playPiezo,    /* Task function. */
@@ -327,7 +332,7 @@ void loop()
       pressure = int(jsObj["main"]["pressure"]);
       humidity = int(jsObj["main"]["humidity"]);
       windspeed = double(jsObj["wind"]["speed"]);
-      sprintf(charbuf, "[CODE] Temperature: %.2f  Pressure: %u  Humidity: %u%  Wind Speed: %.2f",
+      sprintf(charbuf, "Temperature: %.2f\nPressure: %u\nHumidity: %u%\nWind Speed: %.2f",
               temperature, pressure, humidity, windspeed);
       Serial.println(charbuf);
     }
@@ -352,13 +357,13 @@ String httpGETRequest(const char *serverName)
 
   if (httpResponseCode > 0)
   {
-    Serial.print("[WIFI] HTTP Response code: ");
+    Serial.print("HTTP Response code: ");
     Serial.println(httpResponseCode);
     payload = http.getString();
   }
   else
   {
-    Serial.print("[WIFI] Error code: ");
+    Serial.print("Error code: ");
     Serial.println(httpResponseCode);
   }
   // Free resources
@@ -373,16 +378,16 @@ String wifi_processor(const String &var)
   if (var == "INPUTPLACEHOLDER")
   {
     int n = WiFi.scanNetworks();
-    Serial.println("[WIFI] WiFi scan done");
+    Serial.println("WiFi scan done");
 
     String nearbyWifis = "<div><h3>" + String(n) + " networks found</h3>";
 
     if (n == 0)
-      Serial.println("[WIFI] No networks found");
+      Serial.println("No networks found");
     else
     {
       nearbyWifis += "<select name=\"wifis\" id=\"wifis\">";
-      sprintf(charbuf, "[WIFI] %d networks found:", n);
+      sprintf(charbuf, "%d networks found", n);
       Serial.println(charbuf);
       for (int i = 0; i < n; i++)
       {
@@ -401,6 +406,7 @@ String wifi_processor(const String &var)
 
 String main_processor(const String &var)
 {
+  Serial.println(var);
   if (var == "BUTTONPLACEHOLDER")
   {
     String buttons = "";
@@ -422,8 +428,7 @@ String getESPMac()
 
   char macstring[20];
   sprintf(macstring, "%02X:%02X:%02X:%02X:%02X:%02X", mac_base[0], mac_base[1], mac_base[2], mac_base[3], mac_base[4], mac_base[5]);
-  
-  sprintf(charbuf, "[CODE] ESP MAC Address: %s", macstring);
+  sprintf(charbuf, "ESP MAC Address: %s", macstring);
   Serial.println(charbuf);
 
   return String(macstring);
@@ -453,23 +458,23 @@ void noTone(uint8_t pin, uint8_t channel)
 
 void playPiezo(void *pvParameters)
 {
-  // Serial.print("[CODE] Task1 running on core ");
+  // Serial.print("Task1 running on core ");
   // Serial.println(xPortGetCoreID());
 
-  // tone(BUZZER_PIN, NOTE_C4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_D4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_E4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_F4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_G4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_A4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_B4, 500);
-  // noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_C4, 500);
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_D4, 500);
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_E4, 500);
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_F4, 500);
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_G4, 500);
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_A4, 500);
+  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, NOTE_B4, 500);
+  noTone(BUZZER_PIN);
 
   // https://esp32developer.com/programming-in-c-c/tasks/creating-tasks
   vTaskDelete(NULL);
