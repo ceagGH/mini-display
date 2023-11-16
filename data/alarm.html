@@ -18,24 +18,20 @@
 </head>
 <body>
     <h2>ESP Web Server</h2>
-    %INPUTPLACEHOLDER%
-    <label for="pw">Wifi Password:</label>
-    <input type="text" id="pw" name="pw"> <br><br>
-    <label for="apikey"><a href="https://openweathermap.org/">Open Weather Map API Key</a>:</label>
-    <input type="text" id="apikey" name="apikey"> <br><br>
-    <button type="submit" onclick="sendWifi()">Connect!</button>
-    <script>
-        function sendWifi(element) {
-            let wifiName = document.getElementById("wifis").value;
-            let wifiPwd = document.getElementById("pw").value;
-            let apiKey = document.getElementById("apikey").value;
-            console.log(wifiName, wifiPwd, apiKey);
-            let xhr = new XMLHttpRequest();
-            xhr.open("GET", "/init?name=" + wifiName + "&pwd=" + wifiPwd + "&apikey=" + apiKey, true);
-            xhr.send();
+    
+    %ALARMSPLACEHOLDER%
 
-            // fade in to inform user that details are sent, check ESP
-            // validate that apikey is 32 chars long
+    <label for="alarm">Input Alarm:</label>
+    <input type="text" id="alarm" name="alarm"> 
+    <br><br>
+    <button type="submit" onclick="sendAlarm()">Send!</button>
+
+    <script>
+        function sendAlarm(element) {
+            let alarmData = document.getElementById("alarm").value;
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "/init?alarm="+alarmData, true);
+            xhr.send();
         }
     </script>
 </body>

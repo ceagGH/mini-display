@@ -8,11 +8,11 @@ pages to have
 - choose alarm tone
 - choose alarm time, and reminders; connect to gcal?
 
-TODO: save previous time in preferences every minute
-TODO: refresh page when wifi inputted
-TODO: polish user interface
+TODO: set time for alarm to go off, choose buzzer song to play
 TODO: write code for buzzer
+TODO: buzzer + button reminder
 TODO: wifi list // custom wifi name, wifimulti
+TODO: data validation in html site
 */
 
 #include <Arduino.h>
@@ -39,6 +39,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_
 #define TM_DIO 33
 TM1637Display segdisplay = TM1637Display(TM_CLK, TM_DIO);
 // segdisplay.showNumberDecEx(number, 0b01000000, leading_zeros, length, position)
+int segBrightness = 0; // from 0 to 7
 
 void drawInfoBar();
 void drawAPIWeather();
@@ -54,6 +55,14 @@ void drawFace();
 #include <ESPAsyncWebServer.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
 #include <Arduino_JSON.h>
 
+AsyncWebServer server(80);
+String main_processor(const String &var);
+String alarm_processor(const String &var);
+String settings_processor(const String &var);
+
+String jsonBuffer;
+String httpGETRequest(const char *serverName);
+
 // ------------------------------------------ SETUP INPUTS/OUTPUTS ------------------------------------------
 
 #include <DHT.h>
@@ -63,6 +72,13 @@ DHT dht_sensor(DHT_SENSOR_PIN, DHT_SENSOR_TYPE);
 float dht_temp;
 float dht_hum;
 float dht_hi;
+void readDHT();
+void readWeatherAPI();
+
+float temperature, windspeed;
+int pressure, humidity;
+String weather_main, weather_desc;
+int weather_icon;
 
 #define ONBOARD_LED 2
 #define BUZZER_PIN 4
@@ -88,12 +104,26 @@ const char *ntp_server2 = "time.nist.gov";
 int gmt_offset = 4 * 3600; // idk why we need to put 4h for GMT+8
 
 ESP32Time rtc;
-void updateRTC();
 
 unsigned long prev_wifi_millis = 0;
 unsigned long prev_temphum_millis = 0;
 unsigned long prev_time_millis = 0;
 unsigned long prev_display_millis = 0;
+
+typedef struct
+{
+  int sec;
+  int min;
+  int hr;
+  int day;
+  int month;
+  int year;
+  int repeats;
+  int song;
+} alarminfo;
+// ss, mm, hh, DD, MM, YYYY, repeats?, buzzersong
+
+alarminfo alarmData[10];
 
 // ------------------------------------------ SETUP MEMORY/VARIABLES ------------------------------------------
 
@@ -101,19 +131,7 @@ unsigned long prev_display_millis = 0;
 #include <Preferences.h>
 Preferences preferences;
 
-AsyncWebServer server(80);
-String wifi_processor(const String &var);
-String main_processor(const String &var);
-
-String jsonBuffer;
-String httpGETRequest(const char *serverName);
-
-float temperature, windspeed;
-int pressure, humidity;
-String weather_main, weather_desc;
-int weather_icon;
-
-char charbuf[100];
+char charbuf[1000];
 String ssid, password;
 String espmac;
 String getESPMac();
@@ -135,7 +153,7 @@ void setup()
   dht_sensor.begin();
 
   segdisplay.clear();
-  segdisplay.setBrightness(0); // from 0 to 7
+  segdisplay.setBrightness(segBrightness);
 
   const uint8_t hi[] = {
       SEG_B | SEG_C | SEG_E | SEG_F | SEG_G,
@@ -184,11 +202,34 @@ void setup()
   password = preferences.getString("pwd");
   openWeatherMapApiKey = preferences.getString("apikey");
 
+  size_t alarmLen = preferences.getBytesLength("alarm");
+  if (alarmLen == 0 || alarmLen % sizeof(alarminfo) || alarmLen > sizeof(alarmData))
+  {
+    Serial.print("[CODE] Invalid size of schedule array: ");
+    Serial.println(alarmLen);
+  }
+  else
+  {
+    preferences.getBytes("alarm", alarmData, alarmLen);
+    for (int i = 0; i < (alarmLen / sizeof(alarminfo)); i++)
+    {
+      Serial.println(alarmData[i].sec);
+      Serial.println(alarmData[i].min);
+      Serial.println(alarmData[i].hr);
+      Serial.println(alarmData[i].day);
+      Serial.println(alarmData[i].month);
+      Serial.println(alarmData[i].year);
+      Serial.println(alarmData[i].repeats);
+      Serial.println(alarmData[i].song);
+    }
+  }
+
   espmac = getESPMac();
   // try connecting first; if waited 60sec then open wifi connect
-  if (0 < ssid.length() && ssid.length() <= 20 && openWeatherMapApiKey.length() == 32)
+  if (ssid.length() != 0)
   {
-    serverPath = "http://api.openweathermap.org/data/2.5/weather?q=" + city + "," + countryCode + "&APPID=" + openWeatherMapApiKey;
+    if (openWeatherMapApiKey.length() == 32)
+      serverPath = "http://api.openweathermap.org/data/2.5/weather?q=" + city + "," + countryCode + "&APPID=" + openWeatherMapApiKey;
 
     prev_wifi_millis = millis();
     WiFi.mode(WIFI_AP_STA);
@@ -209,15 +250,16 @@ void setup()
 
   if (WiFi.status() != WL_CONNECTED)
   {
-    WiFi.mode(WIFI_AP_STA);
+    WiFi.mode(WIFI_AP);
+
+    IPAddress apIP = IPAddress(192, 168, 4, 1);
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+
     WiFi.softAP(espmac);
 
     IPAddress IP = WiFi.softAPIP();
     Serial.print("[WIFI] AP IP address: ");
     Serial.println(IP);
-
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-              { request->send(SPIFFS, "/wifi.html", String(), false, wifi_processor); });
   }
   else
   {
@@ -228,40 +270,83 @@ void setup()
     struct tm timeinfo;
     if (getLocalTime(&timeinfo))
       rtc.setTimeStruct(timeinfo);
-
-    // Route for root / web page
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-              { request->send(SPIFFS, "/main.html", String(), false, main_processor); });
   }
 
   display.clearDisplay();
   drawInfoBar();
   drawAPIWeather();
+  readDHT();
+  readWeatherAPI();
   display.display();
+
+  // Route for root / web page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/main.html", String(), false, main_processor); });
+
+  server.on("/alarm", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/alarm.html", String(), false, alarm_processor); });
+
+  server.on("/settings", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/settings.html", String(), false, settings_processor); });
 
   server.on("/init", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    String inputName = request->getParam("name")->value();
-    String inputPwd = request->getParam("pwd")->value();
-    String inputApiKey = request->getParam("apikey")->value();
-    if (ssid != inputName || password != inputPwd || openWeatherMapApiKey != inputApiKey) {
-      sprintf(charbuf, "%s - %s - %s", inputName, inputPwd, inputApiKey);
-      Serial.println(charbuf);
+    if (request->hasParam("name") && request->hasParam("pwd")) {
+      String inputName = request->getParam("name")->value();
+      String inputPwd = request->getParam("pwd")->value();
+      
+      if (
+        (inputName.length() || inputPwd.length())
+        && 
+        (ssid != inputName || password != inputPwd)
+      ) {
+        sprintf(charbuf, "%s - %s", inputName, inputPwd);
+        Serial.println(charbuf);
 
-      preferences.putString("ssid", inputName);
-      preferences.putString("pwd", inputPwd);
-      preferences.putString("apikey", inputApiKey);
-      Serial.println("[CODE] Updated preferences");
+        if (ssid != inputName) preferences.putString("ssid", inputName);
+        if (password != inputPwd) preferences.putString("pwd", inputPwd);
+        Serial.println("[CODE] Updated SSID & pwd in preferences");
 
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println("Details received!");
-      display.println("Restarting now...");
-      display.display();
+        display.clearDisplay();
+        display.setCursor(0, 0);
+        display.println("Details received!");
+        display.println("Restarting now...");
+        display.display();
 
-      delay(2000);
-      // TODO: see if can avoid ESP.restart
-      ESP.restart();
+        delay(2000);
+        ESP.restart();
+      }
+    }
+
+    if (request->hasParam("apikey")) {
+      String inputApiKey = request->getParam("apikey")->value();
+      if (inputApiKey.length() && openWeatherMapApiKey != inputApiKey) {
+        Serial.println("[CODE] Received API Key: "); 
+        Serial.println(inputApiKey);
+        preferences.putString("apikey", inputApiKey);
+      }
+    }
+
+    if (request->hasParam("time")) {
+      String inputTime = request->getParam("time")->value();
+      if (inputTime.length() == 10) {
+        Serial.print("[CODE] Received time: ");
+        Serial.println(inputTime);
+        
+        // reset time
+        rtc.setTime(inputTime.toInt());
+      }
+      else {
+        Serial.println("[CODE] Epoch time is not 10 digits, weird...");
+      }
+    }
+
+    if (request->hasParam("alarm")) {
+      String inputAlarm = request->getParam("alarm")->value();
+      if (inputAlarm.length()) {
+        Serial.print("[CODE] Received alarm: ");
+        Serial.println(inputAlarm);
+      }
     }
 
     request->send(200, "text/plain", "OK"); });
@@ -281,7 +366,21 @@ void setup()
 
     request->send(200, "text/plain", "OK"); });
 
-  // AsyncElegantOTA.begin(&server); // Start ElegantOTA
+  server.on("/slider", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    String inputMessage;
+    // GET input1 value on <ESP_IP>/slider?value=<inputMessage>
+    if (request->hasParam("value")) {
+      int sliderval = (request->getParam("value")->value()).toInt();
+      segBrightness = sliderval;
+      segdisplay.setBrightness(sliderval);
+
+      sprintf(charbuf, "[GPIO] Set 7seg brightness to %d", sliderval);
+      Serial.println(charbuf);
+
+    }
+    request->send(200, "text/plain", "OK"); });
+
   server.begin();
   Serial.println("[WIFI] HTTP server started");
 }
@@ -315,11 +414,7 @@ void loop()
     default:
       break;
     }
-
     display.display();
-
-    if (WiFi.status() != WL_CONNECTED)
-      display.startscrollleft(0x0F, 0x0F);
 
     prev_display_millis = millis();
   }
@@ -332,65 +427,23 @@ void loop()
         (rtc.getSecond() % 2 ? 0b01000000 : 0b00000000),
         true, 4, 0);
 
-    // increased brightness from 8am - 6pm
-    if (9 <= rtc.getHour(1) && rtc.getHour(1) <= 17)
-      segdisplay.setBrightness(3);
-    else
-      segdisplay.setBrightness(0);
-
     prev_time_millis = millis();
   }
 
-  // Update temperature & humidity data, from local and from api every 5 mins
-  if (millis() - prev_temphum_millis > 10 * 1000)
+  // Update temperature & humidity data, from local and from api every min
+  if (millis() - prev_temphum_millis > 60 * 1000)
   {
-    dht_temp = dht_sensor.readTemperature();
-    dht_hum = dht_sensor.readHumidity();
-    dht_hi = dht_sensor.computeHeatIndex(dht_temp, dht_hum, false);
+    readDHT();
+    readWeatherAPI();
 
-    if (isnan(dht_temp) || isnan(dht_hum))
-      Serial.println("[MODULE] Failed to read from DHT sensor!");
-    else
-    {
-      sprintf(charbuf, "[MODULE] DHT READ: %.2fC, %.2f%, %.2fC", dht_temp, dht_hum, dht_hi);
-      Serial.println(charbuf);
-    }
-
-    // Check WiFi connection status
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      // put get request on the other core
-      jsonBuffer = httpGETRequest(serverPath.c_str());
-      JSONVar jsObj = JSON.parse(jsonBuffer);
-
-      if (JSON.typeof(jsObj) == "undefined")
-      {
-        Serial.println("[CODE] Parsing input failed!");
-        return;
-      }
-
-      xTaskCreatePinnedToCore(
-          playPiezo,    /* Task function. */
-          "play_piezo", /* name of task. */
-          10000,        /* Stack size of task */
-          NULL,         /* parameter of the task */
-          1,            /* priority of the task */
-          &piezoTask,   /* Task handle to keep track of created task */
-          0);           /* pin task to core 0 */
-
-      temperature = double(jsObj["main"]["temp"]);
-      pressure = int(jsObj["main"]["pressure"]);
-      humidity = int(jsObj["main"]["humidity"]);
-      windspeed = double(jsObj["wind"]["speed"]);
-      weather_main = String((const char *)jsObj["weather"][0]["main"]);
-      weather_desc = String((const char *)jsObj["weather"][0]["description"]);
-      weather_icon = String((const char *)jsObj["weather"][0]["icon"]).toInt();
-
-      sprintf(charbuf, "[CODE] Temperature: %.2f  Pressure: %u  Humidity: %u%%  Wind Speed: %.2f", temperature, pressure, humidity, windspeed);
-      Serial.println(charbuf);
-      sprintf(charbuf, "[CODE] Weather: %s (%s, %u)", weather_main, weather_desc, weather_icon);
-      Serial.println(charbuf);
-    }
+    xTaskCreatePinnedToCore(
+        playPiezo,    /* Task function. */
+        "play_piezo", /* name of task. */
+        10000,        /* Stack size of task */
+        NULL,         /* parameter of the task */
+        1,            /* priority of the task */
+        &piezoTask,   /* Task handle to keep track of created task */
+        0);           /* pin task to core 0 */
 
     prev_temphum_millis = millis();
   }
@@ -427,9 +480,61 @@ String httpGETRequest(const char *serverName)
   return payload;
 }
 
-String wifi_processor(const String &var)
+String main_processor(const String &var)
 {
-  // Serial.println(var);
+  if (var == "BUTTONPLACEHOLDER")
+  {
+    String buttons = "";
+    buttons += "<h4>Output - ONBOARD_LED</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"2\" " + (digitalRead(ONBOARD_LED) ? String("checked") : String("")) + "><span class=\"switchslider\"></span></label>";
+    return buttons;
+  }
+
+  if (var == "APIKEYPLACEHOLDER")
+    if (openWeatherMapApiKey.length() == 32)
+      return openWeatherMapApiKey;
+
+  if (var == "SLIDERVALUE")
+    return String(segBrightness);
+
+  return String();
+}
+
+String alarm_processor(const String &var)
+{
+  if (var == "ALARMPLACEHOLDER")
+  {
+    String currAlarms = "<div>";
+    for (int i = 0; i < (sizeof(alarmData) / sizeof(alarminfo)); i++)
+    {
+      currAlarms += String(alarmData[i].sec) + " ";
+      currAlarms += String(alarmData[i].min) + " ";
+      currAlarms += String(alarmData[i].hr) + " ";
+      currAlarms += String(alarmData[i].day) + " ";
+      currAlarms += String(alarmData[i].month) + " ";
+      currAlarms += String(alarmData[i].year) + " ";
+      currAlarms += String(alarmData[i].repeats) + " ";
+      currAlarms += String(alarmData[i].song) + " ";
+    }
+    currAlarms += "</div>";
+    return currAlarms;
+  }
+
+  return String();
+}
+
+String settings_processor(const String &var)
+{
+  if (var == "CURRSETTINGSPLACEHOLDER")
+  {
+    String info = "";
+    if (ssid.length() != 0)
+      info += "<div id=\"currwifi\">" + ssid + " (" + password + ")</div>";
+    if (openWeatherMapApiKey.length() == 32)
+      info += "<div id=\"currapikey\">" + openWeatherMapApiKey + "</div>";
+
+    return info;
+  }
+
   if (var == "INPUTPLACEHOLDER")
   {
     int n = WiFi.scanNetworks();
@@ -447,26 +552,15 @@ String wifi_processor(const String &var)
       for (int i = 0; i < n; i++)
       {
         // Print SSID and RSSI for each network found
-        sprintf(charbuf, "%d: %s (%d)%s", i + 1, WiFi.SSID(i), WiFi.RSSI(i), (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
-        Serial.println(charbuf);
-        nearbyWifis += "<option value=\"" + String(WiFi.SSID(i)) + "\">" + String(charbuf) + "</option>";
-        delay(10);
+        String info = String(i + 1) + ": " + String(WiFi.SSID(i)) + " (" + String(WiFi.RSSI(i)) + ")" + ((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
+        Serial.println(info);
+        nearbyWifis += "<option value=\"" + String(WiFi.SSID(i)) + "\">" + info + "</option>";
       }
     }
     nearbyWifis += "</select></div><br>";
     return nearbyWifis;
   }
-  return String();
-}
 
-String main_processor(const String &var)
-{
-  if (var == "BUTTONPLACEHOLDER")
-  {
-    String buttons = "";
-    buttons += "<h4>Output - ONBOARD_LED</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"2\" " + (digitalRead(ONBOARD_LED) ? String("checked") : String("")) + "><span class=\"slider\"></span></label>";
-    return buttons;
-  }
   return String();
 }
 
@@ -489,6 +583,62 @@ String getESPMac()
   return String(macstring);
 }
 
+void readDHT()
+{
+  dht_temp = dht_sensor.readTemperature();
+  dht_hum = dht_sensor.readHumidity();
+  dht_hi = dht_sensor.computeHeatIndex(dht_temp, dht_hum, false);
+
+  if (isnan(dht_temp) || isnan(dht_hum))
+    Serial.println("[MODULE] Failed to read from DHT sensor!");
+  else
+  {
+    sprintf(charbuf, "[MODULE] DHT READ: %.2fC, %.2f%, %.2fC", dht_temp, dht_hum, dht_hi);
+    Serial.println(charbuf);
+  }
+
+  return;
+}
+
+void readWeatherAPI()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("[CODE] Not connected, skip reading API");
+    return;
+  }
+  if (openWeatherMapApiKey.length() != 32)
+  {
+    Serial.println("[CODE] Invalid apikey, skip reading API");
+    return;
+  }
+
+  // TODO: put get request on the other core
+  jsonBuffer = httpGETRequest(serverPath.c_str());
+  JSONVar jsObj = JSON.parse(jsonBuffer);
+
+  if (JSON.typeof(jsObj) == "undefined")
+  {
+    Serial.println("[CODE] Parsing input failed!");
+    return;
+  }
+
+  temperature = double(jsObj["main"]["temp"]);
+  pressure = int(jsObj["main"]["pressure"]);
+  humidity = int(jsObj["main"]["humidity"]);
+  windspeed = double(jsObj["wind"]["speed"]);
+  weather_main = String((const char *)jsObj["weather"][0]["main"]);
+  weather_desc = String((const char *)jsObj["weather"][0]["description"]);
+  weather_icon = String((const char *)jsObj["weather"][0]["icon"]).toInt();
+
+  sprintf(charbuf, "[CODE] Temperature: %.2f  Pressure: %u  Humidity: %u%%  Wind Speed: %.2f", temperature, pressure, humidity, windspeed);
+  Serial.println(charbuf);
+  sprintf(charbuf, "[CODE] Weather: %s (%s, %u)", weather_main, weather_desc, weather_icon);
+  Serial.println(charbuf);
+
+  return;
+}
+
 void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel)
 {
   if (ledcRead(channel))
@@ -509,30 +659,6 @@ void noTone(uint8_t pin, uint8_t channel)
 {
   ledcDetachPin(pin);
   ledcWrite(channel, 0);
-}
-
-void playPiezo(void *pvParameters)
-{
-  // Serial.print("[CODE] Task1 running on core ");
-  // Serial.println(xPortGetCoreID());
-
-  // tone(BUZZER_PIN, NOTE_C4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_D4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_E4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_F4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_G4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_A4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_B4, 500);
-  // noTone(BUZZER_PIN);
-
-  // https://esp32developer.com/programming-in-c-c/tasks/creating-tasks
-  vTaskDelete(NULL);
 }
 
 void drawInfoBar()
@@ -605,6 +731,7 @@ void drawSensorData()
 
   return;
 }
+
 void drawAPIWeather()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -620,54 +747,93 @@ void drawAPIWeather()
     display.println("and go to:");
     display.setCursor(10, 46);
     display.println(WiFi.softAPIP());
-  }
-  else
-  {
-    switch (weather_icon)
-    {
-    case 1:
-      display.drawBitmap(0, 0, bitmap_01, 50, 50, WHITE);
-      break;
-    case 2:
-      display.drawBitmap(0, 0, bitmap_02, 50, 50, WHITE);
-      break;
-    case 3:
-      display.drawBitmap(0, 0, bitmap_03, 50, 50, WHITE);
-      break;
-    case 4:
-      display.drawBitmap(0, 0, bitmap_04, 50, 50, WHITE);
-      break;
-    case 9:
-      display.drawBitmap(0, 0, bitmap_09, 50, 50, WHITE);
-      break;
-    case 10:
-      display.drawBitmap(0, 0, bitmap_10, 50, 50, WHITE);
-      break;
-    case 11:
-      display.drawBitmap(0, 0, bitmap_11, 50, 50, WHITE);
-      break;
-    case 13:
-      display.drawBitmap(0, 0, bitmap_13, 50, 50, WHITE);
-      break;
-    case 50:
-      display.drawBitmap(0, 0, bitmap_50, 50, 50, WHITE);
-      break;
-    default:
-      break;
-    }
 
-    display.setCursor(50, 16);
-    display.println(weather_main);
-    display.setCursor(50, 24);
-    display.println(weather_desc);
+    return;
   }
+
+  if (openWeatherMapApiKey.length() != 32)
+  {
+    display.drawBitmap(0, 0, bitmap_key, 20, 20, WHITE);
+    display.setCursor(25, 8);
+    display.println("No API key found!");
+    display.setCursor(0, 30);
+    display.println("To get the weather,");
+    display.setCursor(0, 40);
+    display.print("go to ");
+    display.print(WiFi.localIP());
+    display.println("!");
+    return;
+  }
+
+  switch (weather_icon)
+  {
+  case 1:
+    display.drawBitmap(0, 0, bitmap_01, 50, 50, WHITE);
+    break;
+  case 2:
+    display.drawBitmap(0, 0, bitmap_02, 50, 50, WHITE);
+    break;
+  case 3:
+    display.drawBitmap(0, 0, bitmap_03, 50, 50, WHITE);
+    break;
+  case 4:
+    display.drawBitmap(0, 0, bitmap_04, 50, 50, WHITE);
+    break;
+  case 9:
+    display.drawBitmap(0, 0, bitmap_09, 50, 50, WHITE);
+    break;
+  case 10:
+    display.drawBitmap(0, 0, bitmap_10, 50, 50, WHITE);
+    break;
+  case 11:
+    display.drawBitmap(0, 0, bitmap_11, 50, 50, WHITE);
+    break;
+  case 13:
+    display.drawBitmap(0, 0, bitmap_13, 50, 50, WHITE);
+    break;
+  case 50:
+    display.drawBitmap(0, 0, bitmap_50, 50, 50, WHITE);
+    break;
+  default:
+    break;
+  }
+
+  display.setCursor(50, 16);
+  display.println(weather_main);
+  display.setCursor(50, 24);
+  display.println(weather_desc);
 
   return;
 }
+
 void drawFace()
 {
   int randnum = random(3);
   display.drawBitmap(32, 0, smileys[randnum], 64, 56, WHITE);
 
   return;
+}
+
+void playPiezo(void *pvParameters)
+{
+  // Serial.print("[CODE] Task1 running on core ");
+  // Serial.println(xPortGetCoreID());
+
+  // tone(BUZZER_PIN, NOTE_C4, 500);
+  // noTone(BUZZER_PIN);
+  // tone(BUZZER_PIN, NOTE_D4, 500);
+  // noTone(BUZZER_PIN);
+  // tone(BUZZER_PIN, NOTE_E4, 500);
+  // noTone(BUZZER_PIN);
+  // tone(BUZZER_PIN, NOTE_F4, 500);
+  // noTone(BUZZER_PIN);
+  // tone(BUZZER_PIN, NOTE_G4, 500);
+  // noTone(BUZZER_PIN);
+  // tone(BUZZER_PIN, NOTE_A4, 500);
+  // noTone(BUZZER_PIN);
+  // tone(BUZZER_PIN, NOTE_B4, 500);
+  // noTone(BUZZER_PIN);
+
+  // https://esp32developer.com/programming-in-c-c/tasks/creating-tasks
+  vTaskDelete(NULL);
 }

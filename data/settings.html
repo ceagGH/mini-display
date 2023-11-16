@@ -1,0 +1,80 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>ESP Web Server</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <style>
+        html {font-family: Arial; display: inline-block; text-align: center;}
+        body {max-width: 600px; margin: 0px auto; padding-bottom: 25px;}
+        .switch {position: relative; display: inline-block; width: 120px; height: 68px;}
+        .switch input {display: none}
+        .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 6px;}
+        .slider:before {position: absolute; content: ""; height: 52px; width: 52px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 3px;}
+        input:checked+.slider {background-color: #b30000}
+        input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px);}
+        #currsettings {}
+    </style>
+</head>
+<body>
+    <h2>ESP Web Server</h2>
+    <div>
+        <!-- curr wifi creds, if any -->
+        <h3>Current WiFi:</h3>
+        %CURRSETTINGSPLACEHOLDER%
+        <br><br>
+        <!-- wifi creds input -->
+        %INPUTPLACEHOLDER%
+        <label for="pw">Wifi Password:</label>
+        <input type="text" id="pw" name="pw"><br><br>
+        <button type="submit" onclick="sendWifi()">Send Wifi Details!</button>
+        <br><br>
+        <!-- API Key input -->
+        <label for="apikey"><a href="https://openweathermap.org/">Open Weather Map API Key</a>:</label>
+        <input type="text" id="apikey" name="apikey"><br><br>
+        <button type="submit" onclick="sendAPIKey()">Send API key!</button>
+        <br><br>
+        <!-- set time -->
+        <label for="time">Set time:</label>
+        <input type="datetime-local" id="time" /><br><br>
+        <button type="submit" onclick="sendTime()">Send Time!</button>
+        <br><br>
+        <div id="info"></div>
+    </div>
+    <script>
+        function sendWifi(element) {
+            let wifiName = document.getElementById("wifis").value;
+            let wifiPwd = document.getElementById("pw").value;
+            let xhr = new XMLHttpRequest();
+            xhr.open("GET", "/init?name=" + wifiName + "&pwd=" + wifiPwd, true);
+            xhr.send();
+            let infodiv = document.getElementById("info");
+            infodiv.style.backgroundColor = "green"; infodiv.innerText = `Details sent! :D Connect to ${wifiName}, and go to the IP address shown on display!`;
+        }
+
+        function sendAPIKey(element) {
+            let apiKey = document.getElementById("apikey").value;
+            let infodiv = document.getElementById("info");
+            if (apiKey.length == 0 || apiKey.length == 32) {
+                let xhr = new XMLHttpRequest();
+                xhr.open("GET", "/init?apikey=" + apiKey, true);
+                xhr.send();
+                infodiv.style.backgroundColor = "green"; infodiv.innerText = "API Key sent!"; 
+            }
+            else {
+                infodiv.style.backgroundColor = "red"; infodiv.innerText = "Oof, your API Key seems to not be 32 characters long :P";
+            }
+        }
+
+        function sendTime(element) {
+            let inpTime = new Date(document.getElementById("time").value);
+            let epochTime = inpTime.getTime() / 1000;
+
+            let xhr = new XMLHttpRequest();
+            xhr.open("GET", "/init?time=" + epochTime, true);
+            xhr.send();
+        }
+    </script>
+</body>
+
+</html>
