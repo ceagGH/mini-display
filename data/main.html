@@ -16,22 +16,25 @@
         .segslider { -webkit-appearance: none; margin: 14px; width: 300px; height: 15px; background: #FFD65C; outline: none; -webkit-transition: .2s; transition: opacity .2s;}
         .segslider::-webkit-slider-thumb {-webkit-appearance: none; appearance: none; width: 20px; height: 20px; background: #003249; cursor: pointer;}
         .segslider::-moz-range-thumb { width: 20px; height: 20px; background: #003249; cursor: pointer; } 
-        #apikey {display: hidden;}
+        #apikey {display: none;}
     </style>
 </head>
 <body>
-    <h2>ESP Web Server</h2>
+    <h2><a href="https://t.ly/oCaTo">IoT Clock</a> Main Page</h2>
+
+    <!-- nav -->
+    <a href="/settings">Edit Settings</a>
+    &nbsp;&nbsp;
+    <a href="/alarm">Edit Alarm</a>
 
     %BUTTONPLACEHOLDER%
 
     <!-- 7seg brightness -->
-    <p>7 segment brightness: <span id="textSliderValue">%SLIDERVALUE%</span></p>
+    <h4>7 Segment Brightness: <span id="textSliderValue">%SLIDERVALUE%</span></h4>
     <p><input type="range" onchange="updateSlider(this)" id="pwmSlider" min="0" max="7" value="%SLIDERVALUE%"
             step="1" class="segslider"></p>
 
-    <!-- nav -->
-    <a href="/alarm">Edit Alarm</a>
-    <a href="/settings">Edit Settings</a>
+    
     <div id="apikey">%APIKEYPLACEHOLDER%</div>
     <script>
         let apikey = document.getElementById("apikey").innerText;

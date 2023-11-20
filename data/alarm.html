@@ -5,8 +5,6 @@
     <link rel="icon" href="data:,">
     <style>
         html {font-family: Arial; display: inline-block; text-align: center;}
-        h2 {font-size: 3.0rem;}
-        p {font-size: 3.0rem;}
         body {max-width: 600px; margin:0px auto; padding-bottom: 25px;}
         .switch {position: relative; display: inline-block; width: 120px; height: 68px} 
         .switch input {display: none}
@@ -17,22 +15,176 @@
     </style>
 </head>
 <body>
-    <h2>ESP Web Server</h2>
+    <h2><a href="https://t.ly/oCaTo">IoT Clock</a> Alarms</h2>
+
+    <!-- nav -->
+    <a href="/settings">Edit Settings</a>
+    &nbsp;&nbsp;
+    <a href="/">Homepage</a>
+
+    <h3><span id="numalarms">%NUMALARMS%</span> Current Alarms (Max 10)</h3>
     
     %ALARMSPLACEHOLDER%
 
-    <label for="alarm">Input Alarm:</label>
-    <input type="text" id="alarm" name="alarm"> 
+    <h3>New Alarm:</h3>
+    <label for="repeats">Alarm repeats: </label>
+    <select name="repeats" id="repeats" onchange="changeSelect(this.options[this.selectedIndex].value)">
+        <option value="0">every day</option>
+        <option value="1">every week</option>
+        <option value="2">never</option>
+    </select>
     <br><br>
+
+    <div id="dl">
+        Alarm sounds at&nbsp;
+        <input name="time" id="dtime" type="time"></input>
+    </div>
+
+    <div id="wl">
+        Alarm sounds at&nbsp;
+        <input name="time" id="wtime" type="time"></input>
+        &nbsp;every&nbsp;
+        <select name="wday" id="wday">
+            <option value="0">Sunday</option>
+            <option value="1">Monday</option>
+            <option value="2">Tuesday</option>
+            <option value="3">Wednesday</option>
+            <option value="4">Thursday</option>
+            <option value="5">Friday</option>
+            <option value="6">Saturday</option>
+        </select>
+    </div>
+
+    <div id="nvr">
+        Alarm sounds at&nbsp;
+        <input name="time" id="ntime" type="datetime-local"></input>
+    </div>
+
+    <br>
+    <label for="song">Choose alarm song:</label>
+    <select name="song" id="song">
+        <option value="-1">Random</option>
+        <option value="1">Song 1</option>
+        <option value="2">Song 2</option>
+        <option value="3">Song 3</option>
+    </select>
+    <br><br>
+
     <button type="submit" onclick="sendAlarm()">Send!</button>
+    <br><br>
+
+    <h3>Test Alarm Songs here:</h3>
+    <div>
+        <button type="submit" onclick="testAlarm(1)">Song 1</button>
+        <button type="submit" onclick="testAlarm(2)">Song 2</button>
+        <button type="submit" onclick="testAlarm(3)">Song 3</button>
+    </div>
+    <div id="info"></div>
 
     <script>
-        function sendAlarm(element) {
-            let alarmData = document.getElementById("alarm").value;
+        let nalarms = parseInt(document.getElementById("numalarms").innerText);
+        let infodiv = document.getElementById("info");
+        function padZeros(s) {
+            if (s.length == 1) return `0${s}`;
+            else return s;
+        }
+
+        function deleteAlarm(del) {
+            // remove that alarm from UI
+            let alarmList = document.getElementById("alarmlist");
+            let allAlarms = alarmList.children;
+            for (let k=0; k<allAlarms.length; k++) {
+                // console.log(allAlarms[k]);
+                if (del == k) alarmList.removeChild(allAlarms[k]);
+                if (del < k) allAlarms[k].children[0].setAttribute("onclick", `deleteAlarm(${k-1})`);
+            }
+            nalarms = Math.max(nalarms-1, 0);
+            document.getElementById("numalarms").innerHTML = nalarms;
+            if (nalarms+1 == 10) {
+                infodiv.innerText = "";
+                infodiv.style.display = "none";
+            }
+
             var xhr = new XMLHttpRequest();
-            xhr.open("GET", "/init?alarm="+alarmData, true);
+            xhr.open("GET", "/init?alarmdel="+del, true);
             xhr.send();
         }
+
+        function getDay(w) {
+            if (w == 0) return "Sunday"
+            if (w == 1) return "Monday"
+            if (w == 2) return "Tuesday"
+            if (w == 3) return "Wednesday"
+            if (w == 4) return "Thursday"
+            if (w == 5) return "Friday"
+            if (w == 6) return "Saturday"
+        }
+
+        function sendAlarm(e) {
+            if (nalarms == 10) {
+                infodiv.innerText = "Max of 10 alarms reached!";
+                infodiv.style.display = "block";
+                infodiv.style.backgroundColor = "red";
+                return;
+            }
+            let arep = document.getElementById("repeats").value;
+            let asong = document.getElementById("song").value;            
+
+            let atime;
+            let n = document.createElement("div");
+            if (arep == 0) {
+                atime = document.getElementById("dtime").value;
+                n.innerHTML = `${atime} every day`;
+            }
+            if (arep == 1) {
+                atime = document.getElementById("wtime").value;
+                let wday = document.getElementById("wday").value;
+                n.innerHTML = `${atime} every ${getDay(wday)}`;
+                atime += `_${wday}`;
+            }
+            if (arep == 2) { // example: 2017-06-01T08:30
+                atime = document.getElementById("ntime").value;
+                let t = new Date(atime);
+                n.innerHTML = `${padZeros(t.getHours())}:${padZeros(t.getMinutes())} on ${padZeros(t.getDate())}/${padZeros(t.getMonth()+1)}/${t.getYear()+1900}`;
+            } 
+            if (atime == "" || atime[0] == "_") {
+                infodiv.innerText = "Please input a time!";
+                return;
+            }
+
+            n.innerHTML += `&nbsp;(Song: ${asong == -1 ? "Random" : asong})&nbsp;<button type="submit" onclick="deleteAlarm(${nalarms})">Delete</button>`;
+            nalarms += 1;
+            document.getElementById("numalarms").innerHTML = nalarms;
+
+            console.log(atime);
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", `/init?repeats=${arep}&alarmtime=${atime}&song=${asong}`, true);
+            xhr.send();
+
+            document.getElementById("alarmlist").appendChild(n);
+        }
+
+        function testAlarm(i) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", `/gpio?song=${i}`, true);
+            xhr.send();
+        }
+
+        function changeSelect(rep) {
+            console.log(rep);
+            let dl = document.getElementById("dl");
+            let wl = document.getElementById("wl");
+            let nvr = document.getElementById("nvr");
+
+            if (rep=="0") 
+                dl.style.display = "block", wl.style.display = "none", nvr.style.display = "none";
+            if (rep=="1")
+                wl.style.display = "block", dl.style.display = "none", nvr.style.display = "none";
+            if (rep=="2")
+                nvr.style.display = "block", dl.style.display = "none", wl.style.display = "none";
+        }
+
+        changeSelect(0);
     </script>
 </body>
 </html>

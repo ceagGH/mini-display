@@ -17,24 +17,37 @@
     </style>
 </head>
 <body>
-    <h2>ESP Web Server</h2>
+    <h2><a href="https://t.ly/oCaTo">IoT Clock</a> Settings</h2>
+
+    <!-- nav -->
+    <a href="/">Homepage</a>
+    &nbsp;&nbsp;
+    <a href="/alarm">Edit Alarm</a>
+
     <div>
         <!-- curr wifi creds, if any -->
         <h3>Current WiFi:</h3>
-        %CURRSETTINGSPLACEHOLDER%
-        <br><br>
+        %CURRWIFIPLACEHOLDER%
         <!-- wifi creds input -->
-        %INPUTPLACEHOLDER%
+        <!-- %INPUTPLACEHOLDER% -->
+        <label for="ssid">Wifi Name:</label>
+        <input type="text" id="ssid" name="ssid"><br><br>
         <label for="pw">Wifi Password:</label>
         <input type="text" id="pw" name="pw"><br><br>
         <button type="submit" onclick="sendWifi()">Send Wifi Details!</button>
         <br><br>
         <!-- API Key input -->
-        <label for="apikey"><a href="https://openweathermap.org/">Open Weather Map API Key</a>:</label>
+        <h3>Current API Key:</h3>
+        %CURRAPIPLACEHOLDER%
+        <a href="">What is this?</a>
+        <br><br>
+        <label for="apikey"><a href="https://home.openweathermap.org/api_keys">API Key</a>:</label>
         <input type="text" id="apikey" name="apikey"><br><br>
         <button type="submit" onclick="sendAPIKey()">Send API key!</button>
         <br><br>
+
         <!-- set time -->
+        <h3>Change IoT Clock Time:</h3>
         <label for="time">Set time:</label>
         <input type="datetime-local" id="time" /><br><br>
         <button type="submit" onclick="sendTime()">Send Time!</button>
@@ -43,7 +56,7 @@
     </div>
     <script>
         function sendWifi(element) {
-            let wifiName = document.getElementById("wifis").value;
+            let wifiName = document.getElementById("ssid").value;
             let wifiPwd = document.getElementById("pw").value;
             let xhr = new XMLHttpRequest();
             xhr.open("GET", "/init?name=" + wifiName + "&pwd=" + wifiPwd, true);

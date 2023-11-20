@@ -1,18 +1,22 @@
 /*
+***** For Arduino, install ESP32 Board by copying lthe ink:
+* https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+* 
+***** Make sure to select the "NodeMCU-32S" Board in "Tools > Board" before uploading!
+* 
+***** Also make sure to click "ESP32 Sketch Data Upload" to put the HTML files into the SPIFFS!
+
 Core 1 - Runs webserver async, handles OTA, fetches weather, manage DHT sensor, handles OLED
 Core 0 - plays piezo sometimes, handles button stop alarm
 
-pages to have
-- configure weather (location + apikey)
-- see current settings
-- choose alarm tone
-- choose alarm time, and reminders; connect to gcal?
+TODO: data validation in html site, stresstest
 
-TODO: set time for alarm to go off, choose buzzer song to play
-TODO: write code for buzzer
-TODO: buzzer + button reminder
-TODO: wifi list // custom wifi name, wifimulti
-TODO: data validation in html site
+User Manual: https://docs.google.com/document/d/13_B62WKgXSCFKncpiR5TjrH5HiC2lpAX2O4p0_C5vBc/view
+Public Instructions: https://docs.google.com/document/d/1FX94p-VmW4RWo_-B2vAzvLYiPV2Ckn8iARUBrKDIruo/view
+
+[For CEC Students Only]
+Hardware Instructions: https://docs.google.com/document/d/1vp5-Bf6bVt2BgmSVsTq9r9tmfMt-iGXgfSj-xWOTx8A/edit
+Code Instructions: https://docs.google.com/presentation/d/1Ys43l4QkvRx-jvUKnLD3N2onDkJiMPiqpl9rWZ5XfFM/edit
 */
 
 #include <Arduino.h>
@@ -45,13 +49,14 @@ void drawInfoBar();
 void drawAPIWeather();
 void drawSensorData();
 void drawFace();
+void drawScreen();
 
 // ------------------------------------------ SETUP WIFI ------------------------------------------
 
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <AsyncTCP.h>
-// #include <ESPAsyncWebSrv.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/ // arduino IDE version. idk why anyone would want to use arduino ide over platformio even as a beginner.
+//#include <ESPAsyncWebSrv.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/ // arduino IDE version. idk why anyone would want to use arduino ide over platformio even as a beginner.
 #include <ESPAsyncWebServer.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
 #include <Arduino_JSON.h>
 
@@ -81,18 +86,19 @@ String weather_main, weather_desc;
 int weather_icon;
 
 #define ONBOARD_LED 2
-#define BUZZER_PIN 4
 #define BUTTON_PIN 5
 #define PRESSED 0
 #define NOT_PRESSED 1
+bool buttonPressed = false;
+void IRAM_ATTR isr();
+// for debouncing
+unsigned long button_time = 0;
+unsigned long last_button_time = 0;
+int debounce_time = 333;
 
-#include "pitches.h"
-#define TONE_CHANNEL 15
-TaskHandle_t piezoTask;
-
-void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel);
-void noTone(uint8_t pin, uint8_t channel);
+#include "songs.h"
 void playPiezo(void *pvParameters);
+TaskHandle_t piezoTask;
 
 // -------------------------------------------- SETUP TIMEKEEPING ---------------------------------------------
 
@@ -101,7 +107,7 @@ void playPiezo(void *pvParameters);
 #include "esp_sntp.h"
 const char *ntp_server1 = "pool.ntp.org";
 const char *ntp_server2 = "time.nist.gov";
-int gmt_offset = 4 * 3600; // idk why we need to put 4h for GMT+8
+int gmt_offset = 8 * 3600; // for GMT+8
 
 ESP32Time rtc;
 
@@ -112,18 +118,18 @@ unsigned long prev_display_millis = 0;
 
 typedef struct
 {
-  int sec;
-  int min;
-  int hr;
-  int day;
-  int month;
-  int year;
-  int repeats;
-  int song;
+  int repeats;  // 0:daily; 1:weekly; 2:never
+  tm alarmTime; // https://www.tutorialspoint.com/c_standard_library/time_h.htm
+  int song;     // -1:random, [1,2,3]; s.t. if song == 0 means not initialized
+  bool rang;    // resets to 0 every midnight
 } alarminfo;
-// ss, mm, hh, DD, MM, YYYY, repeats?, buzzersong
 
-alarminfo alarmData[10];
+alarminfo alarmData[10]; // allow ten alarms
+int numAlarms = 0;
+int currSong = 0;
+void printTM(tm t);
+String getDay(int d);
+String padZeros(int t);
 
 // ------------------------------------------ SETUP MEMORY/VARIABLES ------------------------------------------
 
@@ -144,6 +150,7 @@ String city = "George Town", countryCode = "MY", openWeatherMapApiKey = "";
 void setup()
 {
   Serial.begin(115200);
+  espmac = getESPMac();
 
   pinMode(ONBOARD_LED, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -166,7 +173,6 @@ void setup()
                                      { Serial.println("[TIME] Got time adjustment from NTP!"); });
   sntp_servermode_dhcp(1);
 
-  rtc.offset = gmt_offset; // GMT+8
   configTime(gmt_offset, 0, ntp_server1, ntp_server2);
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
@@ -205,26 +211,28 @@ void setup()
   size_t alarmLen = preferences.getBytesLength("alarm");
   if (alarmLen == 0 || alarmLen % sizeof(alarminfo) || alarmLen > sizeof(alarmData))
   {
-    Serial.print("[CODE] Invalid size of schedule array: ");
+    Serial.print("[CODE] Invalid size of alarm array: ");
     Serial.println(alarmLen);
   }
   else
   {
     preferences.getBytes("alarm", alarmData, alarmLen);
+    Serial.println("[CODE]: Read the following alarms: ");
     for (int i = 0; i < (alarmLen / sizeof(alarminfo)); i++)
     {
-      Serial.println(alarmData[i].sec);
-      Serial.println(alarmData[i].min);
-      Serial.println(alarmData[i].hr);
-      Serial.println(alarmData[i].day);
-      Serial.println(alarmData[i].month);
-      Serial.println(alarmData[i].year);
-      Serial.println(alarmData[i].repeats);
-      Serial.println(alarmData[i].song);
+      if (alarmData[i].song != 0)
+      {
+        Serial.print("Time: ");
+        printTM(alarmData[i].alarmTime);
+        Serial.print(" | Repeats: ");
+        Serial.print(alarmData[i].repeats);
+        Serial.print(" | Song: ");
+        Serial.println(alarmData[i].song);
+        numAlarms += 1;
+      }
     }
   }
 
-  espmac = getESPMac();
   // try connecting first; if waited 60sec then open wifi connect
   if (ssid.length() != 0)
   {
@@ -254,6 +262,7 @@ void setup()
 
     IPAddress apIP = IPAddress(192, 168, 4, 1);
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    // https://github.com/espressif/arduino-esp32/issues/1832
 
     WiFi.softAP(espmac);
 
@@ -271,12 +280,12 @@ void setup()
     if (getLocalTime(&timeinfo))
       rtc.setTimeStruct(timeinfo);
   }
+  readDHT();
+  readWeatherAPI();
 
   display.clearDisplay();
   drawInfoBar();
   drawAPIWeather();
-  readDHT();
-  readWeatherAPI();
   display.display();
 
   // Route for root / web page
@@ -295,11 +304,7 @@ void setup()
       String inputName = request->getParam("name")->value();
       String inputPwd = request->getParam("pwd")->value();
       
-      if (
-        (inputName.length() || inputPwd.length())
-        && 
-        (ssid != inputName || password != inputPwd)
-      ) {
+      if (inputName.length() || inputPwd.length()) {
         sprintf(charbuf, "%s - %s", inputName, inputPwd);
         Serial.println(charbuf);
 
@@ -341,12 +346,60 @@ void setup()
       }
     }
 
-    if (request->hasParam("alarm")) {
-      String inputAlarm = request->getParam("alarm")->value();
+    if (request->hasParam("repeats") && request->hasParam("alarmtime") && request->hasParam("song")) {
+      int inputRepeats = (request->getParam("repeats")->value()).toInt();
+      String inputAlarm = request->getParam("alarmtime")->value();
+      int inputSong = (request->getParam("song")->value()).toInt();
+
       if (inputAlarm.length()) {
-        Serial.print("[CODE] Received alarm: ");
+        sprintf(charbuf, "[CODE] Received type %d alarm (%d): ", inputRepeats, inputSong);
+        Serial.print(charbuf);
         Serial.println(inputAlarm);
+
+        // append in array
+        alarminfo newAlarm = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, false};
+        newAlarm.repeats = inputRepeats;
+        newAlarm.song = inputSong;
+
+        
+        if (inputRepeats == 2) { // example: 2017-06-01T08:30
+          newAlarm.alarmTime.tm_min = inputAlarm.substring(14, 16).toInt();
+          newAlarm.alarmTime.tm_hour = inputAlarm.substring(11, 13).toInt();
+          newAlarm.alarmTime.tm_mday = inputAlarm.substring(8, 10).toInt();
+          newAlarm.alarmTime.tm_mon = inputAlarm.substring(5, 7).toInt() - 1;
+          newAlarm.alarmTime.tm_year = inputAlarm.substring(0, 4).toInt() - 1900;
+        }
+        else {
+          newAlarm.alarmTime.tm_hour = inputAlarm.substring(0, 2).toInt();
+          newAlarm.alarmTime.tm_min = inputAlarm.substring(3, 5).toInt();
+          if (inputRepeats == 1) 
+            newAlarm.alarmTime.tm_wday = inputAlarm.substring(6, 7).toInt();
+        }
+        
+        // save in preferences
+        alarmData[numAlarms] = newAlarm;
+        numAlarms += 1;
+        preferences.putBytes("alarm", alarmData, sizeof(alarmData));
       }
+    }
+
+    if (request->hasParam("alarmdel")) {
+      int del = (request->getParam("alarmdel")->value()).toInt();
+      
+      for (int i=0; i<10; i++) {
+        if (alarmData[i].song != 0) {
+          if (del <= i) {
+            if (i+1 < 10) alarmData[i] = alarmData[i+1];
+            else alarmData[i] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+          }
+        }
+        else alarmData[i] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+      }
+      numAlarms = max(numAlarms-1, 0);
+      preferences.putBytes("alarm", alarmData, sizeof(alarmData));
+
+      sprintf(charbuf, "[CODE] Deleted %d alarm, %d remaining", del, numAlarms);
+      Serial.println(charbuf);
     }
 
     request->send(200, "text/plain", "OK"); });
@@ -362,7 +415,20 @@ void setup()
 
       sprintf(charbuf, "[GPIO] %d - Set to: %d - Running on Core %d", inputPin, inputState, xPortGetCoreID());
       Serial.println(charbuf);
-    }  
+    }
+
+    if (request->hasParam("song")) {
+      int inputSong = (request->getParam("song")->value()).toInt();
+      currSong = 0;
+      xTaskCreatePinnedToCore(
+        playPiezo,    /* Task function. */
+        "Play Piezo", /* name of task. */
+        10000,         /* Stack size of task */
+        (void*)inputSong,         /* parameter of the task */
+        0,            /* priority of the task */
+        &piezoTask,   /* Task handle to keep track of created task */
+        0);           /* pin task to core 0 */
+    }
 
     request->send(200, "text/plain", "OK"); });
 
@@ -374,15 +440,18 @@ void setup()
       int sliderval = (request->getParam("value")->value()).toInt();
       segBrightness = sliderval;
       segdisplay.setBrightness(sliderval);
-
       sprintf(charbuf, "[GPIO] Set 7seg brightness to %d", sliderval);
       Serial.println(charbuf);
-
     }
     request->send(200, "text/plain", "OK"); });
 
+  server.onNotFound([](AsyncWebServerRequest *request)
+                    { request->redirect("/"); });
+
   server.begin();
   Serial.println("[WIFI] HTTP server started");
+
+  attachInterrupt(BUTTON_PIN, isr, FALLING);
 }
 
 // ------------------------------------------ LOOP FUNCTION ------------------------------------------
@@ -392,33 +461,6 @@ int display_state = 0;
 
 void loop()
 {
-  // update OLED every minute
-  if (millis() - prev_display_millis > 60 * 1000)
-  {
-    display_state = (display_state + 1) % 3;
-
-    display.clearDisplay();
-    drawInfoBar();
-
-    switch (display_state)
-    {
-    case 0:
-      drawAPIWeather();
-      break;
-    case 1:
-      drawSensorData();
-      break;
-    case 2:
-      drawFace();
-      break;
-    default:
-      break;
-    }
-    display.display();
-
-    prev_display_millis = millis();
-  }
-
   // update 7seg every second
   if (millis() - prev_time_millis > 1 * 1000)
   {
@@ -426,6 +468,48 @@ void loop()
         100 * rtc.getHour(1) + rtc.getMinute(),
         (rtc.getSecond() % 2 ? 0b01000000 : 0b00000000),
         true, 4, 0);
+    Serial.print("[CODE] RTC Time: ");
+    printTM(rtc.getTimeStruct());
+    Serial.println();
+
+    if (currSong == 0) // if nothing is playing now
+    {
+      for (int i = 0; i < numAlarms; i++)
+      {
+        alarminfo a = alarmData[i];
+        if (a.song != 0 && !a.rang)
+        {
+          bool isTime = a.alarmTime.tm_hour == rtc.getHour(1) && a.alarmTime.tm_min == rtc.getMinute();
+
+          if (a.repeats == 1)
+            isTime = (isTime && a.alarmTime.tm_wday == rtc.getDayofWeek());
+          if (a.repeats == 2)
+            isTime = (isTime && a.alarmTime.tm_mday == rtc.getDay() && a.alarmTime.tm_mon == rtc.getMonth() && a.alarmTime.tm_year == (rtc.getYear() - 1900));
+
+          if (isTime) // current time == alarm time
+          {
+            if (a.song == -1)
+              currSong = (int)random(3);
+            else
+              currSong = a.song;
+            rand();
+            alarmData[i].rang = true;
+            xTaskCreatePinnedToCore(
+                playPiezo,    /* Task function. */
+                "Play Piezo", /* name of task. */
+                10000,        /* Stack size of task */
+                NULL,         /* parameter of the task */
+                0,            /* priority of the task */
+                &piezoTask,   /* Task handle to keep track of created task */
+                0);           /* pin task to core 0 */
+          }
+        }
+      }
+    }
+
+    if (rtc.getHour(1) == 0 && rtc.getMinute() == 0)
+      for (int i = 0; i < 10; i++)
+        alarmData[i].rang = false;
 
     prev_time_millis = millis();
   }
@@ -435,21 +519,121 @@ void loop()
   {
     readDHT();
     readWeatherAPI();
-
-    xTaskCreatePinnedToCore(
-        playPiezo,    /* Task function. */
-        "play_piezo", /* name of task. */
-        10000,        /* Stack size of task */
-        NULL,         /* parameter of the task */
-        1,            /* priority of the task */
-        &piezoTask,   /* Task handle to keep track of created task */
-        0);           /* pin task to core 0 */
-
     prev_temphum_millis = millis();
+  }
+
+  // update OLED every minute
+  if (millis() - prev_display_millis > 60 * 1000 && currSong == 0)
+  {
+    display_state = (display_state + 1) % 3;
+
+    display.clearDisplay();
+    drawInfoBar();
+    drawScreen();
+    display.display();
+
+    prev_display_millis = millis();
+  }
+
+  if (display_state != -1 && currSong != 0)
+  {
+    display_state = -1;
+
+    display.clearDisplay();
+    display.drawBitmap(64 - 25, 5, bitmap_alarm, 50, 50, WHITE);
+    display.display();
+  }
+
+  if (buttonPressed)
+  {
+    Serial.println("[CODE] Button pressed, yay");
+    buttonPressed = false;
+
+    if (currSong != 0)
+    {
+      vTaskDelete(piezoTask);
+      piezoTask = NULL;
+      currSong = 0;
+      Serial.println("[CODE] Stopped piezo");
+
+      display_state = 0;
+      display.clearDisplay();
+      drawInfoBar();
+      drawAPIWeather();
+      display.display();
+      prev_display_millis = millis();
+    }
+    else
+    {
+      display_state = (display_state + 1) % 3;
+
+      display.clearDisplay();
+      drawInfoBar();
+      drawScreen();
+      display.display();
+
+      prev_display_millis = millis();
+    }
   }
 }
 
 // ------------------------------------------ HELPER FUNCTIONS ------------------------------------------
+String getESPMac()
+{
+  unsigned char mac_base[6] = {0};
+  esp_efuse_mac_get_default(mac_base);
+  esp_read_mac(mac_base, ESP_MAC_WIFI_STA);
+
+  unsigned char mac_local_base[6] = {0};
+  unsigned char mac_uni_base[6] = {0};
+  esp_derive_local_mac(mac_local_base, mac_uni_base);
+
+  char macstring[20];
+  sprintf(macstring, "%02X:%02X:%02X:%02X:%02X:%02X", mac_base[0], mac_base[1], mac_base[2], mac_base[3], mac_base[4], mac_base[5]);
+
+  sprintf(charbuf, "[CODE] ESP MAC Address: %s", macstring);
+  Serial.println(charbuf);
+
+  return String(macstring);
+}
+
+void printTM(tm t)
+{
+  sprintf(charbuf, "%d/%d/%d (%s), %s:%s:%s", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900, getDay(t.tm_wday), padZeros(t.tm_hour), padZeros(t.tm_min), padZeros(t.tm_sec));
+  Serial.print(charbuf);
+}
+
+String padZeros(int t)
+{
+  if (t < 10)
+    return ("0" + String(t));
+  else
+    return String(t);
+}
+
+String getDay(int d)
+{
+  switch (d)
+  {
+  case 0:
+    return "Sunday";
+  case 1:
+    return "Monday";
+  case 2:
+    return "Tuesday";
+  case 3:
+    return "Wednesday";
+  case 4:
+    return "Thursday";
+  case 5:
+    return "Friday";
+  case 6:
+    return "Saturday";
+  default:
+    return "lol?";
+  }
+}
+
 String httpGETRequest(const char *serverName)
 {
   WiFiClient client;
@@ -485,7 +669,7 @@ String main_processor(const String &var)
   if (var == "BUTTONPLACEHOLDER")
   {
     String buttons = "";
-    buttons += "<h4>Output - ONBOARD_LED</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"2\" " + (digitalRead(ONBOARD_LED) ? String("checked") : String("")) + "><span class=\"switchslider\"></span></label>";
+    buttons += "<h4>ESP32 Blue On Board LED</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"2\" " + (digitalRead(ONBOARD_LED) ? String("checked") : String("")) + "><span class=\"switchslider\"></span></label>";
     return buttons;
   }
 
@@ -501,21 +685,35 @@ String main_processor(const String &var)
 
 String alarm_processor(const String &var)
 {
-  if (var == "ALARMPLACEHOLDER")
+  if (var == "NUMALARMS")
   {
-    String currAlarms = "<div>";
+    return String(numAlarms);
+  }
+  if (var == "ALARMSPLACEHOLDER")
+  {
+    String currAlarms = "<div id=\"alarmlist\">";
     for (int i = 0; i < (sizeof(alarmData) / sizeof(alarminfo)); i++)
     {
-      currAlarms += String(alarmData[i].sec) + " ";
-      currAlarms += String(alarmData[i].min) + " ";
-      currAlarms += String(alarmData[i].hr) + " ";
-      currAlarms += String(alarmData[i].day) + " ";
-      currAlarms += String(alarmData[i].month) + " ";
-      currAlarms += String(alarmData[i].year) + " ";
-      currAlarms += String(alarmData[i].repeats) + " ";
-      currAlarms += String(alarmData[i].song) + " ";
+      if (alarmData[i].song != 0)
+      {
+        currAlarms += "<div>";
+
+        tm alarmtime = alarmData[i].alarmTime;
+        int rep = alarmData[i].repeats; // 0:daily; 1:weekly; 2:never
+        if (rep == 0)
+          currAlarms += padZeros(alarmtime.tm_hour) + ":" + padZeros(alarmtime.tm_min) + " every day";
+        if (rep == 1)
+          currAlarms += padZeros(alarmtime.tm_hour) + ":" + padZeros(alarmtime.tm_min) + " every " + getDay(alarmtime.tm_wday);
+        if (rep == 2)
+          currAlarms += padZeros(alarmtime.tm_hour) + ":" + padZeros(alarmtime.tm_min) + " on " + padZeros(alarmtime.tm_mday) + "/" + padZeros(alarmtime.tm_mon + 1) + "/" + String(alarmtime.tm_year + 1900);
+
+        currAlarms += "&nbsp;(Song: " + (alarmData[i].song == -1 ? "Random" : String(alarmData[i].song)) + ")&nbsp;";
+        currAlarms += "<button type=\"submit\" onclick=\"deleteAlarm(" + String(i) + ")\">Delete</button>";
+        currAlarms += "</div>";
+      }
     }
     currAlarms += "</div>";
+
     return currAlarms;
   }
 
@@ -524,63 +722,58 @@ String alarm_processor(const String &var)
 
 String settings_processor(const String &var)
 {
-  if (var == "CURRSETTINGSPLACEHOLDER")
+  if (var == "CURRWIFIPLACEHOLDER")
   {
     String info = "";
     if (ssid.length() != 0)
-      info += "<div id=\"currwifi\">" + ssid + " (" + password + ")</div>";
-    if (openWeatherMapApiKey.length() == 32)
-      info += "<div id=\"currapikey\">" + openWeatherMapApiKey + "</div>";
-
+    {
+      info += "<div id=\"currwifi\">" + ssid + " (" + password + "), ";
+      if (WiFi.status() == WL_CONNECTED)
+        info += "RSSI: " + String(WiFi.RSSI()) + "</div>";
+      else 
+        info += "Not Connected</div>";
+    }
+    else
+      info += "<div id=\"currwifi\">Not Found</div>";
     return info;
   }
 
-  if (var == "INPUTPLACEHOLDER")
+  if (var == "CURRAPIPLACEHOLDER")
   {
-    int n = WiFi.scanNetworks();
-    Serial.println("[WIFI] WiFi scan done");
-
-    String nearbyWifis = "<div><h3>" + String(n) + " networks found</h3>";
-
-    if (n == 0)
-      Serial.println("[WIFI] No networks found");
+    String info = "";
+    if (openWeatherMapApiKey.length() == 32)
+      info += "<div id=\"currapikey\">" + openWeatherMapApiKey + "</div>";
     else
-    {
-      nearbyWifis += "<select name=\"wifis\" id=\"wifis\">";
-      sprintf(charbuf, "[WIFI] %d networks found:", n);
-      Serial.println(charbuf);
-      for (int i = 0; i < n; i++)
-      {
-        // Print SSID and RSSI for each network found
-        String info = String(i + 1) + ": " + String(WiFi.SSID(i)) + " (" + String(WiFi.RSSI(i)) + ")" + ((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
-        Serial.println(info);
-        nearbyWifis += "<option value=\"" + String(WiFi.SSID(i)) + "\">" + info + "</option>";
-      }
-    }
-    nearbyWifis += "</select></div><br>";
-    return nearbyWifis;
+      info += "<div id=\"currapikey\">Not found</div>";
+    return info;
   }
 
+  // // this crashes ESP32 when visiting /settings ☠️☠️
+  // if (var == "INPUTPLACEHOLDER")
+  // {
+  //   int n = WiFi.scanNetworks();
+  //   Serial.println("[WIFI] WiFi scan done");
+  //   String nearbyWifis = "<div><h3>" + String(n) + " networks found</h3>";
+  //   if (n == 0)
+  //     Serial.println("[WIFI] No networks found");
+  //   else
+  //   {
+  //     nearbyWifis += "<select name=\"wifis\" id=\"wifis\">";
+  //     sprintf(charbuf, "[WIFI] %d networks found:", n);
+  //     Serial.println(charbuf);
+  //     for (int i = 0; i < n; i++)
+  //     {
+  //       // Print SSID and RSSI for each network found
+  //       String info = String(i + 1) + ": " + String(WiFi.SSID(i)) + " (" + String(WiFi.RSSI(i)) + ")" + ((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
+  //       Serial.println(info);
+  //       nearbyWifis += "<option value=\"" + String(WiFi.SSID(i)) + "\">" + info + "</option>";
+  //     }
+  //   }
+  //   nearbyWifis += "</select></div><br>";
+  //   return nearbyWifis;
+  // }
+
   return String();
-}
-
-String getESPMac()
-{
-  unsigned char mac_base[6] = {0};
-  esp_efuse_mac_get_default(mac_base);
-  esp_read_mac(mac_base, ESP_MAC_WIFI_STA);
-
-  unsigned char mac_local_base[6] = {0};
-  unsigned char mac_uni_base[6] = {0};
-  esp_derive_local_mac(mac_local_base, mac_uni_base);
-
-  char macstring[20];
-  sprintf(macstring, "%02X:%02X:%02X:%02X:%02X:%02X", mac_base[0], mac_base[1], mac_base[2], mac_base[3], mac_base[4], mac_base[5]);
-
-  sprintf(charbuf, "[CODE] ESP MAC Address: %s", macstring);
-  Serial.println(charbuf);
-
-  return String(macstring);
 }
 
 void readDHT()
@@ -609,7 +802,7 @@ void readWeatherAPI()
   }
   if (openWeatherMapApiKey.length() != 32)
   {
-    Serial.println("[CODE] Invalid apikey, skip reading API");
+    Serial.println("[CODE] Invalid API Key, skip reading API");
     return;
   }
 
@@ -639,26 +832,22 @@ void readWeatherAPI()
   return;
 }
 
-void tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel)
+void drawScreen()
 {
-  if (ledcRead(channel))
+  switch (display_state)
   {
-    log_e("Tone channel %d is already in use", channel);
-    return;
+  case 0:
+    drawAPIWeather();
+    break;
+  case 1:
+    drawSensorData();
+    break;
+  case 2:
+    drawFace();
+    break;
+  default:
+    break;
   }
-  ledcAttachPin(pin, channel);
-  ledcWriteTone(channel, frequency);
-  if (duration)
-  {
-    delay(duration);
-    noTone(pin, channel);
-  }
-}
-
-void noTone(uint8_t pin, uint8_t channel)
-{
-  ledcDetachPin(pin);
-  ledcWrite(channel, 0);
 }
 
 void drawInfoBar()
@@ -814,26 +1003,67 @@ void drawFace()
   return;
 }
 
-void playPiezo(void *pvParameters)
+void IRAM_ATTR isr()
 {
-  // Serial.print("[CODE] Task1 running on core ");
-  // Serial.println(xPortGetCoreID());
+  // debounce input
+  button_time = millis();
+  if (button_time - last_button_time > debounce_time)
+  {
+    buttonPressed = true;
+    last_button_time = button_time;
+  }
+}
 
-  // tone(BUZZER_PIN, NOTE_C4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_D4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_E4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_F4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_G4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_A4, 500);
-  // noTone(BUZZER_PIN);
-  // tone(BUZZER_PIN, NOTE_B4, 500);
-  // noTone(BUZZER_PIN);
+void playPiezo(void *param)
+{
+  // to copy paste: https://randomnerdtutorials.com/esp32-dual-core-arduino-ide/
+  // more in depth: https://www.circuitstate.com/tutorials/how-to-write-parallel-multitasking-applications-for-esp32-using-freertos-arduino/
+  Serial.print("[CODE] Piezo running on core ");
+  Serial.println(xPortGetCoreID());
 
-  // https://esp32developer.com/programming-in-c-c/tasks/creating-tasks
-  vTaskDelete(NULL);
+  if (currSong == 0 && param != NULL)
+  {
+    int testalarm = (int)param;
+    Serial.print("[CODE] Playing alarm: ");
+    Serial.println(testalarm);
+    switch (testalarm)
+    {
+    case 1:
+      song1();
+      break;
+    case 2:
+      song2();
+      break;
+    case 3:
+      song3();
+      break;
+    default:
+      break;
+    }
+    vTaskDelete(NULL);
+  }
+  else
+  {
+    Serial.print("[CODE] Playing alarm: ");
+    Serial.println(currSong);
+    while (1) // infinite loop
+    {
+      switch (currSong)
+      {
+      case 1:
+        song1();
+        break;
+      case 2:
+        song2();
+        break;
+      case 3:
+        song3();
+        break;
+      default:
+        vTaskDelete(NULL);
+        break;
+      }
+      vTaskDelay(5000);
+    }
+  }
 }
