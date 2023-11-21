@@ -1,9 +1,9 @@
 /*
 ***** For Arduino, install ESP32 Board by copying lthe ink:
 * https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-* 
+*
 ***** Make sure to select the "NodeMCU-32S" Board in "Tools > Board" before uploading!
-* 
+*
 ***** Also make sure to click "ESP32 Sketch Data Upload" to put the HTML files into the SPIFFS!
 
 Core 1 - Runs webserver async, handles OTA, fetches weather, manage DHT sensor, handles OLED
@@ -56,7 +56,7 @@ void drawScreen();
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <AsyncTCP.h>
-//#include <ESPAsyncWebSrv.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/ // arduino IDE version. idk why anyone would want to use arduino ide over platformio even as a beginner.
+// #include <ESPAsyncWebSrv.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/ // arduino IDE version. idk why anyone would want to use arduino ide over platformio even as a beginner.
 #include <ESPAsyncWebServer.h> // https://randomnerdtutorials.com/esp32-async-web-server-espasyncwebserver-library/
 #include <Arduino_JSON.h>
 
@@ -207,6 +207,17 @@ void setup()
   ssid = preferences.getString("ssid");
   password = preferences.getString("pwd");
   openWeatherMapApiKey = preferences.getString("apikey");
+  city = preferences.getString("city");
+  countryCode = preferences.getString("ccode");
+
+  if (city.length() == 0) {
+    city = "George Town";
+    preferences.putString("city", city);
+  }
+  if (countryCode.length() == 0) {
+    countryCode = "MY";
+    preferences.putString("ccode", countryCode);
+  }
 
   size_t alarmLen = preferences.getBytesLength("alarm");
   if (alarmLen == 0 || alarmLen % sizeof(alarminfo) || alarmLen > sizeof(alarmData))
@@ -236,9 +247,6 @@ void setup()
   // try connecting first; if waited 60sec then open wifi connect
   if (ssid.length() != 0)
   {
-    if (openWeatherMapApiKey.length() == 32)
-      serverPath = "http://api.openweathermap.org/data/2.5/weather?q=" + city + "," + countryCode + "&APPID=" + openWeatherMapApiKey;
-
     prev_wifi_millis = millis();
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(ssid, password);
@@ -326,9 +334,29 @@ void setup()
     if (request->hasParam("apikey")) {
       String inputApiKey = request->getParam("apikey")->value();
       if (inputApiKey.length() && openWeatherMapApiKey != inputApiKey) {
-        Serial.println("[CODE] Received API Key: "); 
+        Serial.print("[CODE] Received API Key: "); 
         Serial.println(inputApiKey);
+
+        openWeatherMapApiKey = inputApiKey;
         preferences.putString("apikey", inputApiKey);
+      }
+    }
+
+    if (request->hasParam("city") && request->hasParam("ccode")) {
+      String inputCity = request->getParam("city")->value();
+      String inputCCode = request->getParam("ccode")->value();
+      if (inputCity.length() && inputCCode.length()) {
+        Serial.print("[CODE] Received Location: "); 
+        Serial.print(inputCity);
+        Serial.print(", ");
+        Serial.println(inputCCode);
+
+        city = inputCity;
+        countryCode = inputCCode;
+        preferences.putString("city", inputCity);
+        preferences.putString("ccode", inputCCode);
+
+        readWeatherAPI();
       }
     }
 
@@ -730,7 +758,7 @@ String settings_processor(const String &var)
       info += "<div id=\"currwifi\">" + ssid + " (" + password + "), ";
       if (WiFi.status() == WL_CONNECTED)
         info += "RSSI: " + String(WiFi.RSSI()) + "</div>";
-      else 
+      else
         info += "Not Connected</div>";
     }
     else
@@ -742,9 +770,15 @@ String settings_processor(const String &var)
   {
     String info = "";
     if (openWeatherMapApiKey.length() == 32)
-      info += "<div id=\"currapikey\">" + openWeatherMapApiKey + "</div>";
+      info += openWeatherMapApiKey;
     else
-      info += "<div id=\"currapikey\">Not found</div>";
+      info += "Not found";
+    return info;
+  }
+
+  if (var == "CURRLOCATIONPLACEHOLDER")
+  {
+    String info = String(city) + ", " + String(countryCode);
     return info;
   }
 
@@ -807,6 +841,9 @@ void readWeatherAPI()
   }
 
   // TODO: put get request on the other core
+  if (openWeatherMapApiKey.length() == 32)
+    serverPath = "http://api.openweathermap.org/data/2.5/weather?q=" + city + "," + countryCode + "&APPID=" + openWeatherMapApiKey;
+
   jsonBuffer = httpGETRequest(serverPath.c_str());
   JSONVar jsObj = JSON.parse(jsonBuffer);
 
@@ -991,6 +1028,10 @@ void drawAPIWeather()
   display.println(weather_main);
   display.setCursor(50, 24);
   display.println(weather_desc);
+  display.setCursor(50, 36);
+  display.print(city);
+  display.print(", ");
+  display.println(countryCode);
 
   return;
 }

@@ -13,7 +13,6 @@
         .slider:before {position: absolute; content: ""; height: 52px; width: 52px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 3px;}
         input:checked+.slider {background-color: #b30000}
         input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px);}
-        #currsettings {}
     </style>
 </head>
 <body>
@@ -36,47 +35,75 @@
         <input type="text" id="pw" name="pw"><br><br>
         <button type="submit" onclick="sendWifi()">Send Wifi Details!</button>
         <br><br>
-        <!-- API Key input -->
-        <h3>Current API Key:</h3>
-        %CURRAPIPLACEHOLDER%
-        <a href="">What is this?</a>
-        <br><br>
-        <label for="apikey"><a href="https://home.openweathermap.org/api_keys">API Key</a>:</label>
-        <input type="text" id="apikey" name="apikey"><br><br>
-        <button type="submit" onclick="sendAPIKey()">Send API key!</button>
-        <br><br>
-
         <!-- set time -->
         <h3>Change IoT Clock Time:</h3>
         <label for="time">Set time:</label>
         <input type="datetime-local" id="time" /><br><br>
         <button type="submit" onclick="sendTime()">Send Time!</button>
         <br><br>
+        <!-- API Key input -->
+        <h3>Current Weather Info:</h3>
+        <p>Current API Key: %CURRAPIPLACEHOLDER%</p>
+        <p>Current Location: %CURRLOCATIONPLACEHOLDER%</p>
+        <a href="https://t.ly/oCaTo" target="_blank">What is this?</a>
+        <br><br>
+        <label for="apikey"><a href="https://home.openweathermap.org/api_keys">API Key</a>:</label>
+        <input type="text" id="apikey" name="apikey"><br>
+        <label for="city">City:</label>
+        <input type="text" id="city" name="city"><br>
+        <label for="ccode">Country Code:</label>
+        <input type="text" id="ccode" name="ccode"><br>
+        <br>
+        <button type="submit" onclick="sendWeather()">Send Weather Info!</button>
+        <br><br>
+
+        
         <div id="info"></div>
     </div>
     <script>
+        let infodiv = document.getElementById("info");
+
         function sendWifi(element) {
             let wifiName = document.getElementById("ssid").value;
             let wifiPwd = document.getElementById("pw").value;
+            
             let xhr = new XMLHttpRequest();
             xhr.open("GET", "/init?name=" + wifiName + "&pwd=" + wifiPwd, true);
             xhr.send();
-            let infodiv = document.getElementById("info");
+            
             infodiv.style.backgroundColor = "green"; infodiv.innerText = `Details sent! :D Connect to ${wifiName}, and go to the IP address shown on display!`;
         }
 
-        function sendAPIKey(element) {
+        function sendWeather(element) {
             let apiKey = document.getElementById("apikey").value;
-            let infodiv = document.getElementById("info");
-            if (apiKey.length == 0 || apiKey.length == 32) {
-                let xhr = new XMLHttpRequest();
-                xhr.open("GET", "/init?apikey=" + apiKey, true);
-                xhr.send();
-                infodiv.style.backgroundColor = "green"; infodiv.innerText = "API Key sent!"; 
+
+            let city = document.getElementById("city").value;
+            let ccode = document.getElementById("ccode").value;
+            if (apiKey.length != 0 && apiKey.length != 32) {
+                infodiv.style.backgroundColor = "red"; infodiv.innerText = "Oof, your API Key seems to not be 32 characters long :P";
+                return;   
+            }
+            if (city.length * ccode.length == 0) {
+                infodiv.style.backgroundColor = "red"; infodiv.innerText = "Oof, please input both city and country code";
+                return;
             }
             else {
-                infodiv.style.backgroundColor = "red"; infodiv.innerText = "Oof, your API Key seems to not be 32 characters long :P";
+                if (!validLocation(city, ccode)) {
+                    infodiv.style.backgroundColor = "red"; infodiv.innerText = "Oof, invalid city or country code";
+                    return;
+                }
             }
+
+            let xhr = new XMLHttpRequest();
+            if (city.length && ccode.length) {
+                xhr.open("GET", `/init?apikey=${apiKey}&city=${city}&ccode=${ccode}`, true);
+            }
+            else { 
+                xhr.open("GET", `/init?apikey=${apiKey}`, true);
+            }
+
+            xhr.send();
+            infodiv.style.backgroundColor = "green"; infodiv.innerText = "Weather Details sent!"; 
         }
 
         function sendTime(element) {
@@ -86,6 +113,11 @@
             let xhr = new XMLHttpRequest();
             xhr.open("GET", "/init?time=" + epochTime, true);
             xhr.send();
+        }
+
+        function validLocation(city, ccode) {
+            // TODO IN THE FUTURE
+            return true;
         }
     </script>
 </body>
